@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>終極 LF2 · 單機測試</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#171b20;color:#f6f2e8;font:16px system-ui}main{max-width:850px;margin:auto;padding:16px}h1{font-size:24px;margin:0 0 12px}label{display:block;padding:12px 0}canvas{display:block;background:#070809;width:100%;max-height:64dvh;object-fit:contain}button{color:inherit;background:#303a45;border:1px solid #707980;border-radius:8px;padding:10px;font:inherit;touch-action:none;user-select:none;-webkit-user-select:none}nav{display:flex;justify-content:space-between;gap:8px;margin-top:8px;flex-wrap:wrap}nav section{display:flex;gap:4px}button:active{background:#566a79}p{margin:8px 0}#shell{display:none}
+</style><main><h1>終極 LF2 · 單機測試</h1><label>選取本機的 LF2-single-player.zip　<input type="file" accept=".zip" id="game"></label><button id="boot" disabled>啟動單機遊戲</button><p id="notice" role="status">請先選取遊戲包。初次啟動需要下載 Wine 執行環境。</p><canvas id="canvas" tabindex="0" width="800" height="450"></canvas><nav aria-label="遊戲控制"><section id="direction"></section><section id="action"></section></nav><small>方向與動作鍵對應遊戲包內使用方向鍵的玩家欄位。</small><div id="shell"></div></main>
+<script>
+const byId = id => document.getElementById(id);
+const runtime = 'https://cdn.jsdelivr.net/gh/andrewnakas/exebrowser@0b3fd066c8bb50b8d374f4341e6f9f7a579d1a13/public/boxedwine/build/default/';
+const wineRoot = 'https://boxedwine-assets.exebrowser.workers.dev/fs/';
+const notice = message => { byId('notice').textContent = message; };
+const addScript = url => new Promise((resolve,reject) => {
+  const script=document.createElement('script'); script.src=url; script.onload=resolve;
+  script.onerror=()=>reject(Error('載入失敗：'+url)); document.head.append(script);
+});
+const fileInput=byId('game'), boot=byId('boot'), screenCanvas=byId('canvas');
+fileInput.onchange=()=>{boot.disabled=!fileInput.files.length;};
+for (const id of 'status progress spinner dropzone output startbtn uploadbtn downloadbtn inline-runbtn inline run-inline loading showConsole sound-checkbox soundToggle message modalLink modalLinkExe openModalExeClick tree items selectedItem loadStatus'.split(' ')){
+  const el=document.createElement(id==='progress'?'progress':'div');el.id=id;byId('shell').append(el);
+}
+function sendKey(type,key,code,num){
+  const e=new KeyboardEvent(type,{key,code,bubbles:true,cancelable:true,location:code.endsWith('Left')?1:0});
+  for(const field of ['which','keyCode']) Object.defineProperty(e,field,{get:()=>num});
+  screenCanvas.dispatchEvent(e);
+}
+for (const [group,label,key,code,num] of [
+ ['direction','←','ArrowLeft','ArrowLeft',37],['direction','↑','ArrowUp','ArrowUp',38],
+ ['direction','↓','ArrowDown','ArrowDown',40],['direction','→','ArrowRight','ArrowRight',39],
+ ['action','Enter','Enter','Enter',13],['action','Shift','Shift','ShiftLeft',16],['action','Ctrl','Control','ControlLeft',17],['action','Esc','Escape','Escape',27]]){
+  const button=document.createElement('button');button.textContent=label;byId(group).append(button);
+  const held=new Set();button.onpointerdown=e=>{e.preventDefault();button.setPointerCapture(e.pointerId);if(!held.size)sendKey('keydown',key,code,num);held.add(e.pointerId);};
+  button.onlostpointercapture=e=>{if(held.delete(e.pointerId)&&!held.size) sendKey('keyup',key,code,num);};
+}
+boot.onclick=async()=>{
+  boot.disabled=true;fileInput.disabled=true;
+  try {
+    notice('正在載入執行環境…');
+    await addScript(runtime+'jszip.min.js'); await addScript(runtime+'browserfs.boxedwine.js');
+    const Buffer=BrowserFS.BFSRequire('buffer').Buffer;
+    const mount=await new Promise(async(resolve,reject)=>{
+      try{const bytes=await fileInput.files[0].arrayBuffer();
+        BrowserFS.FileSystem.ZipFS.Create({zipData:new Buffer(new Uint8Array(bytes))},(err,fs)=>err?reject(err):resolve(fs));
+      }catch(err){reject(err);}
+    });
+    if(!mount.existsSync('/LF2.exe')||!mount.existsSync('/data/data.txt')) throw Error('請使用含有 LF2.exe 與 data/data.txt 的單機測試包。');
+    await addScript(runtime+'boxedwine-shell.js');
+    Config.isRunningInline=true; Config.locateRootBaseUrl=wineRoot;
+    Config.urlParams='root=fullWine1.7.55-v8&app=game.zip&p=LF2.exe&auto=true&sound=true&bpp=32';
+    buildAppFileSystems=callback=>callback(new BrowserFS.FileSystem.FolderAdapter('/',mount));
+    Module.canvas=screenCanvas;Module.locateFile=name=>runtime+name;
+    Module.setStatus=message=>{if(message)notice(message);};
+    Module.onAbort=()=>notice('模擬器已停止。請重新整理後再試。');
+    notice('正在啟動 Wine…');screenCanvas.focus();await addScript(runtime+'boxedwine.js');
+  }catch(error){notice(error.message+' 請重新整理後再試。');}
+};
+</script></html>
