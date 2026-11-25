@@ -1,0 +1,69 @@
+name: Package Ultimate LF2 touch layout IPA
+on:
+  push:
+    branches: [openlf2-ios-build]
+    paths: [.github/workflows/openlf2-ios-touch.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify the independent build
+        env:
+          SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-independent-45605160533-1
+          IPA: Ultimate-LF2-iOS-arm64-unsigned.ipa
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
+          curl -fsSL --retry 3 --max-time 60 "$SOURCE/$IPA.sha256" -o "$IPA.sha256"
+          sha256sum -c "$IPA.sha256"
+      - name: Reorder the three primary touch controls
+        run: |
+          mkdir -p artifacts
+          python3 - <<'PY'
+          import plistlib
+          from zipfile import ZipFile
+
+          source = 'Ultimate-LF2-iOS-arm64-unsigned.ipa'
+          output = 'artifacts/Ultimate-LF2-iOS-arm64-unsigned.ipa'
+          app = 'Payload/openlf2.app/'
+          script = app + 'scripts/base/ui/touch_gamepad.lua'
+          positions = 'local primary_positions = {c = "b", b = "f", f = "c"}'
+          before = '        local config = layout[action]'
+          after = before + '\n        local position = layout[primary_positions[action]] or config'
+          marker = 'local function build_buttons(layout, screen)'
+
+          with ZipFile(source) as original, ZipFile(output, 'w') as updated:
+              info = plistlib.loads(original.read(app + 'Info.plist'))
+              assert info['CFBundleIdentifier'] == 'io.github.retrogamehub.lf2ultimate'
+              touch = original.read(script).decode()
+              assert touch.count(before) == 1 and touch.count(marker) == 1
+              touch = touch.replace(before, after)
+              assert touch.count('math.floor(config.right)') == 1
+              assert touch.count('math.floor(config.bottom)') == 2
+              touch = touch.replace('math.floor(config.right)', 'math.floor(position.right)')
+              touch = touch.replace('math.floor(config.bottom), radius', 'math.floor(position.bottom), radius')
+              touch = touch.replace(marker, positions + '\n' + marker)
+              for entry in original.infolist():
+                  data = touch.encode() if entry.filename == script else original.read(entry)
+                  updated.writestr(entry, data)
+
+          with ZipFile(source) as original, ZipFile(output) as updated:
+              assert updated.testzip() is None
+              assert original.namelist() == updated.namelist()
+              changed = [name for name in original.namelist() if original.read(name) != updated.read(name)]
+              assert changed == [script], changed
+          PY
+          (cd artifacts && sha256sum *.ipa > Ultimate-LF2-iOS-arm64-unsigned.ipa.sha256)
+      - name: Publish the touch layout IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-touch-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜攻跳防配置版" \
+            --notes "Touch positions from top to bottom: attack, jump, defend. Same independent bundle ID. Unsigned ARM64 IPA."
