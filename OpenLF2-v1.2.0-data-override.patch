@@ -1,0 +1,176 @@
+diff --git a/.gitignore b/.gitignore
+index 3de8d12..8ddca78 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -12,3 +12,4 @@
+ *.so
+ *.dylib
+ __pycache__/
++/scripts/data-override/
+diff --git a/BUILDING.md b/BUILDING.md
+index 8ac1800..28c0883 100644
+--- a/BUILDING.md
++++ b/BUILDING.md
+@@ -64,3 +64,16 @@ there is no file picker). Startup steps appear as notifications and in
+ The PS5 build renders with SDL2's software renderer and has no translated text (SDL3_ttf is
+ unavailable) and no rumble; network games are untested. Choosing Quit leaves the title
+ idle; close it from the PS button menu.
++
++## Build with a local data override
++
++With an existing game data ZIP that contains top-level asset folders, run
++`python3 dist/stage-data-override.py /path/to/data.zip` before building.
++This stages normalized asset paths under `scripts/data-override`. The Apple
++build includes this folder. The game first reads staged resources and then
++falls back to the supported LF2 v2.0a installer for resources it cannot find.
++The installer is still required. Gameplay rules and EXE resources come from
++the existing OpenLF2 build and supported installer, respectively.
++
++Use `bash dist/build-apple.sh ios-device-arm64` on macOS with the iOS SDK and
++Conan to build the unsigned IPA. Sign the resulting IPA before installing.
+diff --git a/dist/stage-data-override.py b/dist/stage-data-override.py
+new file mode 100644
+index 0000000..70bc439
+--- /dev/null
++++ b/dist/stage-data-override.py
+@@ -0,0 +1,43 @@
++"""Stage an existing game data ZIP for an OpenLF2 data-override build."""
++
++import argparse
++from pathlib import Path
++from tempfile import TemporaryDirectory
++from zipfile import ZipFile
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("archive", type=Path)
++    args = parser.parse_args()
++    destination = Path(__file__).resolve().parents[1] / "scripts" / "data-override"
++    if destination.exists():
++        parser.error(f"move the existing data override aside first: {destination}")
++    staged = set()
++    with ZipFile(args.archive) as archive, TemporaryDirectory(dir=destination.parent) as temp:
++        root = Path(temp)
++        for entry in archive.infolist():
++            path = entry.filename.replace("\\", "/").lower()
++            parts = path.split("/")
++            if entry.is_dir() or Path(path).suffix not in {".dat", ".txt", ".bmp", ".wav", ".lfr", ".wma", ".mp3"}:
++                continue
++            if len(parts) < 2 or parts[0] not in {"data", "sprite", "pics", "bg", "audio", "death"}:
++                continue
++            if any(part in {"", ".", ".."} for part in parts) or any(
++                ord(character) < 32 or ord(character) >= 127 or character == ":" for character in path
++            ):
++                parser.error(f"unsupported resource path: {entry.filename}")
++            if path in staged or entry.file_size > 16 * 1024 * 1024:
++                parser.error(f"duplicate or oversized resource: {entry.filename}")
++            target = root.joinpath(*parts)
++            target.parent.mkdir(parents=True, exist_ok=True)
++            target.write_bytes(archive.read(entry))
++            staged.add(path)
++        if not {"data/data.txt", "data/stage.dat"}.issubset(staged):
++            parser.error("missing data/data.txt or data/stage.dat")
++        root.rename(destination)
++    print(f"Staged {len(staged)} files into {destination}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/app/application.cpp b/src/app/application.cpp
+index 0fe6ba7..8ba7450 100644
+--- a/src/app/application.cpp
++++ b/src/app/application.cpp
+@@ -491,8 +491,10 @@ Result<Configuration> configuration(std::span<const std::string> arguments,
+ }
+ class GameResources final : public ResourceSource {
+ public:
+-    GameResources(const InstallerArchive& archive, Bytes executable, std::span<const PackageAsset> assets)
+-        : archive_(archive), executable_(std::move(executable)) {
++    GameResources(const InstallerArchive& archive, Bytes executable, std::span<const PackageAsset> assets,
++                  std::filesystem::path override_directory)
++        : archive_(archive), executable_(std::move(executable)),
++          override_directory_(std::move(override_directory)) {
+         for (const auto& asset : assets) assets_.emplace(asset.resource, asset);
+     }
+     Result<Bytes> read(std::string_view path) const override {
+@@ -510,16 +512,30 @@ public:
+             }
+             return bitmap_resource(executable_, name);
+         }
+-        auto bytes = archive_.read(*normalized);
+-        // Original bitmaps are RLE8; consumers receive uncompressed BMP data.
++        auto bytes = read_game_data(*normalized);
++        // Consumers receive uncompressed BMP data from either source.
+         if (!bytes || !normalized->ends_with(".bmp")) return bytes;
+         auto converted = bitmap::from_file(*bytes);
+         if (!converted) converted.error().message = *normalized + ": " + converted.error().message;
+         return converted;
+     }
+ private:
++    Result<Bytes> read_game_data(const std::string& resource) const {
++        std::error_code error;
++        const auto kind = std::filesystem::status(override_directory_ / resource, error).type();
++        if (kind == std::filesystem::file_type::not_found) return archive_.read(resource);
++        if (error) return fail(ErrorCode::io, "cannot check data override: " + resource + ": " + error.message());
++        if (kind != std::filesystem::file_type::regular) {
++            return fail(ErrorCode::format, "data override is not a regular file: " + resource);
++        }
++        auto file = package_file(override_directory_, resource);
++        if (!file) return std::unexpected(file.error());
++        return read_file(*file, 16 * 1024 * 1024);
++    }
++
+     const InstallerArchive& archive_;
+     Bytes executable_;
++    std::filesystem::path override_directory_;
+     std::map<std::string, PackageAsset, std::less<>> assets_;
+ };
+ // The game data once the installer is loaded; reads fail before that, while the window
+@@ -914,7 +930,8 @@ Result<void> run(const Configuration& config) {
+     if (!executable) return std::unexpected(executable.error());
+     auto constants = recording_constants(*executable);
+     if (!constants) return std::unexpected(constants.error());
+-    const auto& resources = game_data.attach(std::make_unique<GameResources>(*archive, std::move(*executable), scripts->assets));
++    const auto& resources = game_data.attach(std::make_unique<GameResources>(*archive, std::move(*executable), scripts->assets,
++                                                                            config.scripts / "data-override"));
+     auto bootstrap = read_file(config.scripts / "runtime/bootstrap.lua", 1024 * 1024);
+     if (!bootstrap) return std::unexpected(bootstrap.error());
+     const auto menu_seed = config.seed.value_or(static_cast<std::uint32_t>(
+diff --git a/src/resources/bitmap.cpp b/src/resources/bitmap.cpp
+index 12bb76e..ac22f1d 100644
+--- a/src/resources/bitmap.cpp
++++ b/src/resources/bitmap.cpp
+@@ -131,6 +131,19 @@ Result<Bytes> from_file(std::span<const char> file) {
+         if (view.text(0, 2) != "BM") throw FormatError("missing BMP signature");
+         const std::size_t pixels = view.u32(10);
+         if (pixels < 14) throw FormatError("bitmap pixels overlap file header");
++        // A 24-bit BITMAPCOREHEADER image has the same padded pixel rows as
++        // BITMAPINFOHEADER. Normalize the header without altering the pixels.
++        if (view.u32(14) == 12 && view.u16(24) == 24) {
++            if (pixels < 26 || pixels > file.size()) throw FormatError("invalid core bitmap pixel offset");
++            Bytes dib(header_size, '\0');
++            store_u32(dib, 0, header_size);
++            store_u32(dib, 4, view.u16(18));
++            store_u32(dib, 8, view.u16(20));
++            store_u32(dib, 12, view.u16(22) | (24U << 16));
++            const auto rows = file.subspan(pixels);
++            dib.insert(dib.end(), rows.begin(), rows.end());
++            return convert(dib, header_size);
++        }
+         return convert(view.slice(14, file.size() - 14), pixels - 14);
+     } catch (const FormatError& error) { return fail(ErrorCode::format, error.what()); }
+ }
+diff --git a/src/resources/object_data.cpp b/src/resources/object_data.cpp
+index 2c45363..a0e775a 100644
+--- a/src/resources/object_data.cpp
++++ b/src/resources/object_data.cpp
+@@ -335,7 +335,7 @@ private:
+         }
+         auto& frame = data_.frames[static_cast<std::size_t>(index)];
+         if (frame.defined) note("frame " + std::to_string(index) + " redefined; earlier fields kept");
+-        frame.name = read_word(section, 20);
++        frame.name = read_word(section, 128); // Frame labels are stored as strings.
+         frame.defined = true;
+         frame.interactions.clear();
+         frame.bodies.clear();
