@@ -30,10 +30,10 @@ index 8ac1800..28c0883 100644
 +Conan to build the unsigned IPA. Sign the resulting IPA before installing.
 diff --git a/dist/stage-data-override.py b/dist/stage-data-override.py
 new file mode 100644
-index 0000000..dfc2613
+index 0000000..ca9d6fb
 --- /dev/null
 +++ b/dist/stage-data-override.py
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,74 @@
 +"""Stage an existing game data ZIP for an OpenLF2 data-override build."""
 +
 +import argparse
@@ -41,6 +41,26 @@ index 0000000..dfc2613
 +from pathlib import Path
 +from tempfile import TemporaryDirectory
 +from zipfile import ZipFile
++
++
++def write_fighter_names(root):
++    section = (root / "data/data.txt").read_bytes().split(b"<object>", 1)[1].split(b"<object_end>", 1)[0]
++    key = b"SiuHungIsAGoodBearBecauseHeIsVeryGood"
++    names = {}
++    for raw_path in re.findall(rb"type:[ \t]*0[ \t]+file:[ \t]*(\S+)", section):
++        path = raw_path.decode("ascii").replace("\\", "/").lower()
++        if any(part in {"", ".", ".."} for part in path.split("/")) or ":" in path:
++            raise ValueError(f"unsupported fighter path: {path}")
++        data = (root / path).read_bytes()
++        if path.endswith(".dat"):
++            data = bytes((data[i] - key[i % len(key)]) % 256 for i in range(123, len(data)))
++        header = re.search(rb"<bmp_begin>(.*?)<bmp_end>", data, re.S)
++        name = re.search(rb"name:[ \t]*(\S+)", header[1]) if header else None
++        if name and not name[1].isascii():
++            names[path] = name[1].decode("cp950")
++    (root / "data/override-fighter-names.txt").write_text(
++        "".join(f"{path}\t{name}\n" for path, name in sorted(names.items())), encoding="utf-8"
++    )
 +
 +
 +def main():
@@ -81,12 +101,173 @@ index 0000000..dfc2613
 +            staged.add(path)
 +        if not {"data/data.txt", "data/stage.dat"}.issubset(staged):
 +            parser.error("missing data/data.txt or data/stage.dat")
++        write_fighter_names(root)
 +        root.rename(destination)
 +    print(f"Staged {len(staged)} files into {destination}")
 +
 +
 +if __name__ == "__main__":
 +    main()
+diff --git a/scripts/base/game/catalog.lua b/scripts/base/game/catalog.lua
+index b7bd309..fe0b312 100644
+--- a/scripts/base/game/catalog.lua
++++ b/scripts/base/game/catalog.lua
+@@ -23,6 +23,11 @@ function catalog.load()
+     if cached then return cached end
+     local source = engine.read_resource("data/data.txt")
+     local section = assert(source:match("<object>(.-)<object_end>"), "missing object catalog")
++    local unicode_names = {}
++    local has_names, names = pcall(engine.read_resource, "data/override-fighter-names.txt")
++    if has_names and type(names) == "string" then
++        for path, name in names:gmatch("([^\t\n]+)\t([^\n]+)") do unicode_names[path] = name end
++    end
+     local fighters = {}
+     local record = -1
+     for line in (section .. "\n"):gmatch("([^\n]*)\n") do
+@@ -38,10 +43,15 @@ function catalog.load()
+                 if path:sub(-4) == ".dat" then data = decode(data) end
+                 local header = assert(data:match("<bmp_begin>(.-)<bmp_end>"), "missing character header: " .. path)
+                 local name = assert(header:match("name:%s*(%S+)"), "missing character name: " .. path)
++                local unicode_name = unicode_names[path]
++                if unicode_name then
++                    name = name:match("([%w_%-]+)$") or path:match("([^/]+)%.[^.]+$")
++                end
+                 local portrait = assert(header:match("head:%s*(%S+)"), "missing portrait: " .. path)
+                 local family = math.floor(id / 10)
+                 fighters[#fighters + 1] = {id = id, record = record, name = name,
+-                    portrait = canonical(portrait), path = path, hidden = family == 3 or family == 5}
++                    portrait = canonical(portrait), path = path, unicode_name = unicode_name,
++                    hidden = family == 3 or family == 5}
+                 assert(#fighters <= 400, "too many character records")
+             end
+         elseif line:find("%S") and not id then error("invalid object catalog line") end
+diff --git a/scripts/base/game/unlock.lua b/scripts/base/game/unlock.lua
+index 2c07e8b..8e05995 100644
+--- a/scripts/base/game/unlock.lua
++++ b/scripts/base/game/unlock.lua
+@@ -6,6 +6,11 @@ local unlock = {}
+ 
+ unlock.flags = {characters = 0, function_keys = 0}
+ 
++function unlock.enable_data_override()
++    local loaded, names = pcall(engine.read_resource, "data/override-fighter-names.txt")
++    if loaded and type(names) == "string" then unlock.flags.characters = 1 end
++end
++
+ -- Virtual-key codes of each word (0xbe is the period key) with its record bit, flag and buffer.
+ local words = {
+     {keys = {0x4c, 0x46, 0x32, 0xbe, 0x4e, 0x45, 0x54}, bit = 1, flag = "characters", buffer = 3},
+diff --git a/scripts/base/i18n/i18n.lua b/scripts/base/i18n/i18n.lua
+index 082cf6b..5d3ac97 100644
+--- a/scripts/base/i18n/i18n.lua
++++ b/scripts/base/i18n/i18n.lua
+@@ -41,6 +41,7 @@ end
+ 
+ -- True when text is drawn with TrueType fonts.
+ function i18n.active() return selected ~= "default" and host_text end
++function i18n.has_text() return host_text end
+ function i18n.antialias() return antialias end
+ 
+ -- Messages the host or the scripts build with numbers or names in them ("Network accept: system error 10") match a
+diff --git a/scripts/base/ui/championship.lua b/scripts/base/ui/championship.lua
+index 767188f..352956c 100644
+--- a/scripts/base/ui/championship.lua
++++ b/scripts/base/ui/championship.lua
+@@ -62,7 +62,9 @@ end
+ local function add(state, command) state.display[#state.display + 1] = command end
+ local function sprite(state, resource, source, x, y, keyed) add(state, {"sprite", resource, source, x, y, keyed}) end
+ local function image(state, resource, x, y) add(state, {"image", resource, x, y}) end
+-local function text(state, value, x, y, color, background) add(state, {"text", value, x, y, color, background}) end
++local function text(state, value, x, y, color, background, unicode_name)
++    add(state, {"text", value, x, y, color, background, unicode_name})
++end
+ local white, option_blue, label_box = 0xffffff, 0x9b9bff, 0x2f478f
+ local human_label, computer_label = 0x4d79e6, 0xc87996
+ local function blink_color(state)
+@@ -156,7 +158,7 @@ local function selection(state, key)
+         local fighter = state.fighters[entrant.fighter]
+         image(state, fighter and fighter.portrait or "pe/rface", offset_x + 25, offset_y + 53)
+         text(state, fighter and fighter.name or " Random", offset_x + 59, offset_y + 206,
+-            state.stage == selection_steps.fighter and blink_color(state) or white)
++            state.stage == selection_steps.fighter and blink_color(state) or white, nil, fighter and fighter.unicode_name)
+         if state.stage == selection_steps.controller then
+             if key == "r" or key == "l" then entrant.human = entrant.human < 1 and 1 or 0 end
+             if key == "c" then
+@@ -687,7 +689,7 @@ function screen.draw(state, context)
+         local kind = command[1]
+         if kind == "image" then context.image(command[2], command[3], command[4], false)
+         elseif kind == "sprite" then context.sprite(command[2], command[3], command[4], command[5], command[6])
+-        elseif kind == "text" then font.gdi(context, command[2], command[3], command[4], command[5], command[6])
++        elseif kind == "text" then font.gdi(context, command[2], command[3], command[4], command[5], command[6], nil, nil, command[7])
+         elseif kind == "title" then
+             if i18n.active() then
+                 font.gdi(context, i18n.tr("2 on 2 Championship （淘汰賽）"), command[2], command[3], 0xffffff, nil, "center", 16)
+diff --git a/scripts/base/ui/character_select.lua b/scripts/base/ui/character_select.lua
+index 7a86104..244826a 100644
+--- a/scripts/base/ui/character_select.lua
++++ b/scripts/base/ui/character_select.lua
+@@ -29,8 +29,8 @@ local function blink_color(state)
+     local step = state.blink % 6
+     return (step * 30 + 0x19) * 65536 + (step * 30 + 0x46) * 256 + 0xff
+ end
+-local function text(state, value, x, y, color, background, align)
+-    state.display[#state.display + 1] = {"text", value, x, y, color, background, align}
++local function text(state, value, x, y, color, background, align, unicode_name)
++    state.display[#state.display + 1] = {"text", value, x, y, color, background, align, unicode_name}
+ end
+ -- The name field below a slot. Translated text is centered in its black area; the original's bitmap text
+ -- starts at a fixed column, padded with spaces.
+@@ -96,7 +96,11 @@ local function previous_fighter(state, slot) slot.fighter = catalog.step(state.f
+ local function draw_fighter(state, slot, col, row, color)
+     local fighter = state.fighters[slot.fighter]
+     image(state, fighter and fighter.portrait or "pe/rface", col + 147, row + 94)
+-    slot_text(state, fighter and fighter.name or " Random", col, row, color, row + 241)
++    if fighter and fighter.unicode_name and i18n.has_text() then
++        text(state, fighter.name, col + 207, row + 241, color, nil, "center", fighter.unicode_name)
++    else
++        slot_text(state, fighter and fighter.name or " Random", col, row, color, row + 241)
++    end
+ end
+ local function draw_team(state, slot, col, row, color)
+     if slot.team == constants.teams.independent then slot_text(state, "Independent", col, row, color, row + 263, 167)
+@@ -670,7 +674,7 @@ function selection.draw(state, context)
+         if command[1] == "image" then context.image(command[2], command[3], command[4], false)
+         elseif command[1] == "sprite" then
+             context.sprite(command[2], command[3], command[4], command[5], command[6])
+-        elseif command[1] == "text" then font.gdi(context, command[2], command[3], command[4], command[5], command[6], command[7])
++        elseif command[1] == "text" then font.gdi(context, command[2], command[3], command[4], command[5], command[6], command[7], nil, command[8])
+         elseif command[1] == "fill" then
+             context.fill(command[2], command[3], command[4], command[5], command[6], command[6], command[6])
+         end
+diff --git a/scripts/base/ui/flow.lua b/scripts/base/ui/flow.lua
+index 2419329..d787281 100644
+--- a/scripts/base/ui/flow.lua
++++ b/scripts/base/ui/flow.lua
+@@ -55,6 +55,7 @@ function flow.create(options)
+     local settings = controls.load(options.default_controller)
+     -- OpenLF2's own options (base/game/options), e.g. the unlocked characters.
+     user_options.start()
++    unlock.enable_data_override()
+     local state = {active = "launch", title = title.create(options), options = options,
+         launch = require("base/ui/launch").create({menu_seed = options.menu_seed, problem = settings.problem}),
+         pointer_x = 0, pointer_y = 0, previous_button = false, volume_frames = 0,
+diff --git a/scripts/base/ui/font.lua b/scripts/base/ui/font.lua
+index 8670673..491576e 100644
+--- a/scripts/base/ui/font.lua
++++ b/scripts/base/ui/font.lua
+@@ -127,9 +127,9 @@ end
+ -- GDI text at (x, y), top-left like TextOut. `color` (0xRRGGBB, default white; red/blue
+ -- swapped for COLORREF); `background`, if given, paints an opaque box behind the text (16px high).
+ -- `align` as for font.draw; `size` is the TrueType font size (translated languages only).
+-function font.gdi(context, text, x, y, color, background, align, size)
+-    if i18n.active() then
+-        text = i18n.tr(text)
++function font.gdi(context, text, x, y, color, background, align, size, unicode_name)
++    if i18n.active() or (unicode_name and i18n.has_text()) then
++        text = unicode_name or i18n.tr(text)
+         if text == "" then return end
+         context.text(text, x, y, align or "left", size or ttf_size, color or 0xffffff, nil, background, i18n.antialias())
+         return
 diff --git a/src/app/application.cpp b/src/app/application.cpp
 index 0fe6ba7..8ba7450 100644
 --- a/src/app/application.cpp
