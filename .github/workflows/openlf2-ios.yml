@@ -46,7 +46,7 @@ jobs:
           unzip -tq "$ipa"
           unzip -Z1 "$ipa" | awk '/^Payload\/openlf2.app\/scripts\/data-override\/data\/stage.dat$/ { found=1 } END { exit !found }'
           unzip -p "$ipa" Payload/openlf2.app/openlf2 > "$RUNNER_TEMP/openlf2-bin"
-          xcrun lipo -verify_arch arm64 "$RUNNER_TEMP/openlf2-bin"
+          xcrun lipo -archs "$RUNNER_TEMP/openlf2-bin" | grep -Fx arm64
           (cd "$GITHUB_WORKSPACE/artifacts" && shasum -a 256 *.ipa > OpenLF2-Ultimate-iOS-arm64-unsigned.ipa.sha256)
       - uses: actions/upload-artifact@v4
         with:
