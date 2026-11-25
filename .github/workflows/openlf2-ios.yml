@@ -22,7 +22,7 @@ jobs:
       - name: Prepare pinned OpenLF2 source
         run: |
           git clone --depth 1 --branch v1.2.0 https://github.com/OpenLF2/OpenLF2.git upstream
-          test "$(git -C upstream rev-parse HEAD)" = 6942db7cfaddf2e65eb45e4d4632120dc968f7
+          test "$(git -C upstream rev-parse HEAD)" = 6942db7cfaddf2e65eb45e4a4d4632120dc968f7
           git -C upstream apply --check "$GITHUB_WORKSPACE/OpenLF2-v1.2.0-data-override.patch"
           git -C upstream apply "$GITHUB_WORKSPACE/OpenLF2-v1.2.0-data-override.patch"
       - name: Stage the verified game data
