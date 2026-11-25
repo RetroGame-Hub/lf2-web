@@ -1,0 +1,65 @@
+name: Package independent Ultimate LF2 IPA
+on:
+  push:
+    branches: [openlf2-ios-build]
+    paths: [.github/workflows/openlf2-ios-identity.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify the name and unlock build
+        env:
+          SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/openlf2-ios-test-45599362831-1
+          IPA: OpenLF2-Ultimate-iOS-arm64-unsigned.ipa
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
+          curl -fsSL --retry 3 --max-time 60 "$SOURCE/$IPA.sha256" -o "$IPA.sha256"
+          sha256sum -c "$IPA.sha256"
+      - name: Give Ultimate LF2 its own iOS identity
+        run: |
+          mkdir -p artifacts
+          python3 - <<'PY'
+          import plistlib
+          from zipfile import ZipFile
+
+          source = 'OpenLF2-Ultimate-iOS-arm64-unsigned.ipa'
+          output = 'artifacts/Ultimate-LF2-iOS-arm64-unsigned.ipa'
+          plist = 'Payload/openlf2.app/Info.plist'
+          app = 'Payload/openlf2.app/'
+          bundle_id = 'io.github.retrogamehub.lf2ultimate'
+
+          with ZipFile(source) as original, ZipFile(output, 'w') as updated:
+              files = original.namelist()
+              assert app + 'embedded.mobileprovision' not in files
+              assert not any('/_CodeSignature/' in path for path in files)
+              info = plistlib.loads(original.read(plist))
+              assert info['CFBundleIdentifier'] == 'io.github.openlf2.openlf2'
+              info['CFBundleIdentifier'] = bundle_id
+              info['CFBundleDisplayName'] = '終極 LF2'
+              info['CFBundleName'] = '終極 LF2'
+              for entry in original.infolist():
+                  data = plistlib.dumps(info) if entry.filename == plist else original.read(entry)
+                  updated.writestr(entry, data)
+
+          with ZipFile(source) as original, ZipFile(output) as updated:
+              assert updated.testzip() is None
+              assert original.namelist() == updated.namelist()
+              changed = [name for name in original.namelist() if original.read(name) != updated.read(name)]
+              assert changed == [plist], changed
+              assert plistlib.loads(updated.read(plist))['CFBundleIdentifier'] == bundle_id
+          PY
+          (cd artifacts && sha256sum *.ipa > Ultimate-LF2-iOS-arm64-unsigned.ipa.sha256)
+      - name: Publish the independent unsigned IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-independent-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜獨立安裝版" \
+            --notes "Same character-name and offline-unlock build. Separate iOS bundle ID: io.github.retrogamehub.lf2ultimate. Unsigned ARM64 IPA."
