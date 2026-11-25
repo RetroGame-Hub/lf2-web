@@ -30,13 +30,14 @@ index 8ac1800..28c0883 100644
 +Conan to build the unsigned IPA. Sign the resulting IPA before installing.
 diff --git a/dist/stage-data-override.py b/dist/stage-data-override.py
 new file mode 100644
-index 0000000..70bc439
+index 0000000..dfc2613
 --- /dev/null
 +++ b/dist/stage-data-override.py
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,53 @@
 +"""Stage an existing game data ZIP for an OpenLF2 data-override build."""
 +
 +import argparse
++import re
 +from pathlib import Path
 +from tempfile import TemporaryDirectory
 +from zipfile import ZipFile
@@ -67,7 +68,16 @@ index 0000000..70bc439
 +                parser.error(f"duplicate or oversized resource: {entry.filename}")
 +            target = root.joinpath(*parts)
 +            target.parent.mkdir(parents=True, exist_ok=True)
-+            target.write_bytes(archive.read(entry))
++            data = archive.read(entry)
++            if path == "data/data.txt":
++                # Older mod catalogs can label a type-2 object's path "fire:"
++                # instead of "file:". OpenLF2's catalog requires "file:".
++                data = re.sub(
++                    rb"(?m)^([ \t]*id:[ \t]*\d+[ \t]+type:[ \t]*2[ \t]+)fire:(?=[ \t])",
++                    rb"\g<1>file:",
++                    data,
++                )
++            target.write_bytes(data)
 +            staged.add(path)
 +        if not {"data/data.txt", "data/stage.dat"}.issubset(staged):
 +            parser.error("missing data/data.txt or data/stage.dat")
