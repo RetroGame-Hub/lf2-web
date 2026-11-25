@@ -1,0 +1,62 @@
+name: Build OpenLF2 iOS test IPA
+on:
+  push:
+    branches: [openlf2-ios-build]
+    paths:
+      - .github/workflows/openlf2-ios.yml
+      - OpenLF2-v1.2.0-data-override.patch
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare pinned OpenLF2 source
+        run: |
+          git clone --depth 1 --branch v1.2.0 https://github.com/OpenLF2/OpenLF2.git upstream
+          test "$(git -C upstream rev-parse HEAD)" = 6942db7cfaddf2e65eb45e4d4632120dc968f7
+          git -C upstream apply --check "$GITHUB_WORKSPACE/OpenLF2-v1.2.0-data-override.patch"
+          git -C upstream apply "$GITHUB_WORKSPACE/OpenLF2-v1.2.0-data-override.patch"
+      - name: Stage the verified game data
+        run: |
+          for part in 00 01 02; do
+            curl --fail --silent --show-error --retry 3 --max-time 120 \
+              "https://lf2-single-player.celestialharp8.chatgpt.site/lf2-part-$part" -o "lf2-part-$part"
+          done
+          cat lf2-part-00 lf2-part-01 lf2-part-02 > lf2-data.zip
+          printf '%s  %s\n' ea73db8e4a4741a45a05c8d3d1084e96fb01dce0c78677dfafea0ff888396fa1 lf2-data.zip | shasum -a 256 -c
+          python3 upstream/dist/stage-data-override.py "$GITHUB_WORKSPACE/lf2-data.zip"
+      - name: Install build dependencies
+        run: python3 -m pip install 'conan==2.32.0'
+      - name: Build and validate iOS ARM64 IPA
+        working-directory: upstream
+        run: |
+          bash dist/build-apple.sh ios-device-arm64
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          ipa="$GITHUB_WORKSPACE/artifacts/OpenLF2-Ultimate-iOS-arm64-unsigned.ipa"
+          mv out/OpenLF2-iOS-arm64-unsigned.ipa "$ipa"
+          unzip -tq "$ipa"
+          unzip -Z1 "$ipa" | awk '/^Payload\/openlf2.app\/scripts\/data-override\/data\/stage.dat$/ { found=1 } END { exit !found }'
+          unzip -p "$ipa" Payload/openlf2.app/openlf2 > "$RUNNER_TEMP/openlf2-bin"
+          xcrun lipo -verify_arch arm64 "$RUNNER_TEMP/openlf2-bin"
+          (cd "$GITHUB_WORKSPACE/artifacts" && shasum -a 256 *.ipa > OpenLF2-Ultimate-iOS-arm64-unsigned.ipa.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenLF2-Ultimate-iOS-arm64-unsigned
+          path: artifacts/*
+          if-no-files-found: error
+      - name: Publish unsigned test IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "openlf2-ios-test-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --target "$GITHUB_SHA" --prerelease --title "OpenLF2 終極資料版 iOS 試裝包" \
+            --notes "Unsigned native iOS ARM64 test build. Sign before installing. The LF2 v2.0a installer is still required at first launch."
