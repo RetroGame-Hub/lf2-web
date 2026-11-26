@@ -1,0 +1,119 @@
+name: Package Ultimate LF2 gameplay fixes IPA
+on:
+  push:
+    branches: [openlf2-ios-build]
+    paths: [.github/workflows/openlf2-ios-gameplay-fix.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      IPA: Ultimate-LF2-iOS-arm64-unsigned.ipa
+    steps:
+      - name: Download and verify the independent build
+        env:
+          SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-template-45749092887-1
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
+          curl -fsSL --retry 3 --max-time 60 "$SOURCE/$IPA.sha256" -o "$IPA.sha256"
+          sha256sum -c "$IPA.sha256"
+      - name: Apply the Template artwork and shared effect fixes
+        run: |
+          mkdir -p artifacts
+          python3 - "$IPA" "artifacts/$IPA" <<'PY'
+          import plistlib
+          import struct
+          import sys
+          from zipfile import ZipFile
+          
+          APP = 'Payload/openlf2.app/'
+          DATA = APP + 'scripts/data-override/'
+          GAME = APP + 'scripts/base/game/'
+          EFFECT = DATA + 'sprite/sys/s-davis_lr.bmp'
+          TEMPLATE = 'sprite/template1/'
+          
+          
+          def replace_once(source, old, new):
+              assert source.count(old) == 1, old
+              return source.replace(old, new)
+          
+          
+          def remap_portrait(data):
+              source = data.decode()
+              return replace_once(source, 'portrait = canonical(portrait), path = path,',
+                                  'portrait = path == "data/template.dat" and "sprite/template1/face.bmp" or canonical(portrait), path = path,').encode()
+          
+          
+          def remap_template(data):
+              source = data.decode()
+              source = replace_once(source, '        cache[path] = data', '''        if path == "data/template.dat" then
+                      data.head = "sprite/template1/face.bmp"
+                      data.small = "sprite/template1/s.bmp"
+                      data.ultimate_template = true
+                  end
+                  cache[path] = data''')
+              return replace_once(source, '    local picture = frame.picture + (offset or 0)', '''    local picture = frame.picture + (offset or 0)
+              if data.ultimate_template and picture >= 0 and picture < 140 then
+                  local cell = picture % 70
+                  return picture < 70 and "sprite/template1/0.bmp" or "sprite/template1/1.bmp",
+                      {(cell % 10) * 80, math.floor(cell / 10) * 80, 79, 79}
+              end''').encode()
+          
+          
+          def pad_effect(data):
+              width, height, planes, depth, compression = struct.unpack_from('<iiHHI', data, 18)
+              offset = struct.unpack_from('<I', data, 10)[0]
+              assert data[:2] == b'BM' and struct.unpack_from('<I', data, 14)[0] == 40
+              assert (width, height, planes, depth, compression, offset) == (312, 172, 1, 8, 0, 1078)
+              assert data[54:58] == bytes(4)
+              assert len(data) == offset + width * height
+              # The renderer treats black (palette index 0) as transparent. Keep the original
+              # pixels at their original top-left coordinates, including the mirrored draw.
+              padded_width, padded_height = 320, 172
+              pixels = b''.join(data[start:start + width] + bytes(padded_width - width)
+                                for start in range(offset, len(data), width))
+              header = bytearray(data[:offset])
+              struct.pack_into('<I', header, 2, offset + len(pixels))
+              struct.pack_into('<ii', header, 18, padded_width, padded_height)
+              struct.pack_into('<I', header, 34, len(pixels))
+              return bytes(header) + pixels
+          
+          
+          def package(source, output):
+              edits = {GAME + 'catalog.lua': remap_portrait, GAME + 'object_data.lua': remap_template, EFFECT: pad_effect}
+              with ZipFile(source) as original, ZipFile(output, 'w') as updated:
+                  assert plistlib.loads(original.read(APP + 'Info.plist'))['CFBundleIdentifier'] == 'io.github.retrogamehub.lf2ultimate'
+                  assert DATA + 'data/template.dat' not in original.namelist()
+                  for name, dimensions in {'0.bmp': (800, 560), '1.bmp': (800, 560), 'face.bmp': (120, 120), 's.bmp': (40, 45)}.items():
+                      bitmap = original.read(DATA + TEMPLATE + name)
+                      assert struct.unpack_from('<ii', bitmap, 18) == dimensions, name
+                  assert edits.keys() <= set(original.namelist())
+                  for entry in original.infolist():
+                      content = original.read(entry)
+                      if entry.filename in edits:
+                          content = edits[entry.filename](content)
+                      updated.writestr(entry, content)
+          
+              with ZipFile(source) as original, ZipFile(output) as updated:
+                  assert updated.testzip() is None
+                  assert original.namelist() == updated.namelist()
+                  assert {name for name in updated.namelist() if original.read(name) != updated.read(name)} == edits.keys()
+          
+          
+          if __name__ == '__main__':
+              package(*sys.argv[1:])
+          PY
+          (cd artifacts && sha256sum *.ipa > Ultimate-LF2-iOS-arm64-unsigned.ipa.sha256)
+      - name: Publish the gameplay fixes IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-gameplay-fix-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜透明人與戰鬥閃退修正版" \
+            --notes "Use the Ultimate LF2 wireframe Template artwork and keep the shared ice effect within texture bounds. Unsigned ARM64 IPA."
