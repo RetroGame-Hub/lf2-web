@@ -12,11 +12,12 @@ jobs:
   package:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      IPA: Ultimate-LF2-iOS-arm64-unsigned.ipa
     steps:
       - name: Download and verify the independent build
         env:
           SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-touch-45605974333-1
-          IPA: Ultimate-LF2-iOS-arm64-unsigned.ipa
         run: |
           curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
           curl -fsSL --retry 3 --max-time 60 "$SOURCE/$IPA.sha256" -o "$IPA.sha256"
