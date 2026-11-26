@@ -1,0 +1,188 @@
+name: Package Ultimate LF2 return button IPA
+on:
+  push:
+    branches: [openlf2-ios-build]
+    paths: [.github/workflows/openlf2-ios-back.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify the independent build
+        env:
+          SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-touch-45605974333-1
+          IPA: Ultimate-LF2-iOS-arm64-unsigned.ipa
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
+          curl -fsSL --retry 3 --max-time 60 "$SOURCE/$IPA.sha256" -o "$IPA.sha256"
+          sha256sum -c "$IPA.sha256"
+      - name: Add a return button to fight screens
+        run: |
+          mkdir -p artifacts
+          python3 - "$IPA" "artifacts/$IPA" <<'PY'
+          import plistlib
+          import sys
+          from zipfile import ZipFile
+          
+          APP = 'Payload/openlf2.app/'
+          UI = APP + 'scripts/base/ui/'
+          
+          
+          def replace(source, old, new):
+              assert source.count(old) == 1, old
+              return source.replace(old, new)
+          
+          
+          def gamepad(source):
+              source = replace(source, '    state.buttons = build_buttons(state.layout, screen)', '''    state.back = {x = state.pause.x, y = state.pause.y + math.max(56, state.pause.radius * 3),
+                  radius = state.pause.radius}
+              state.buttons = build_buttons(state.layout, screen)''')
+              source = replace(source, '    if mode ~= "full" then consider(state.pause); consider(state.fast) end', '''    if mode ~= "full" then
+                  consider(state.pause)
+                  consider(state.fast)
+                  consider(state.back)
+              end''')
+              source = replace(source, '        return "", false, false', '        return "", false, false, false')
+              source = replace(source, '    state.pause_held, state.fast_held, state.mode = pause_held, fast_held, mode',
+                               '''    local back_held = pressed[state.back] == true
+              state.pause_held, state.fast_held, state.mode = pause_held, fast_held, mode''')
+              assert source.count('pause_held, fast_held\n') == 2
+              source = source.replace('pause_held, fast_held\n', 'pause_held, fast_held, back_held\n')
+              source = replace(source, 'local function draw_pause(state, context)', '''local function draw_back(state, context)
+              local back = state.back
+              disc(context, back.x, back.y, back.radius, outline[1], outline[2], outline[3])
+              disc(context, back.x, back.y, back.radius - 3, 60, 60, 68)
+              local half = math.max(3, math.floor(back.radius * 0.45))
+              for row = -half, half do
+                  local left = back.x - half + math.abs(row)
+                  local width = half - math.abs(row) + 1
+                  context.fill(left, back.y + row, width, 1, 235, 235, 240)
+              end
+              context.fill(back.x, back.y - 1, half + 1, 3, 235, 235, 240)
+          end
+          
+          local function draw_pause(state, context)''')
+              return replace(source, '        draw_fast(state, button_context)', '''        draw_fast(state, button_context)
+                  draw_back(state, button_context)''')
+          
+          
+          def flow(source):
+              source = replace(source, 'local function escape_free(state)', '''local function return_from_fight(state, context)
+              local current = state.match.match
+              if state.session then
+                  disconnect(state, i18n.tr("Network game disconnected"))
+              elseif current.replay then
+                  leave_replay(state)
+                  if state.options.start_screen == "replay" then context.action("quit") end
+              else
+                  if current.recording and not current.recording.saved and current.round_counter < 101 then
+                      recording.status = {kind = constants.recording_statuses.cancelled, count = 0}
+                  end
+                  local modes = constants.modes
+                  if current.mode == modes.championship or current.mode == modes.team_championship then
+                      state.championship = require("base/ui/championship").create(state.championship.options,
+                          current.mode == modes.team_championship)
+                      state.active = "championship"
+                  elseif current.mode == modes.demo then
+                      state.active = "title"
+                  else
+                      local selection = require("base/ui/character_select")
+                      state.characters = selection.reset_all(state.characters)
+                      state.active = "characters"
+                  end
+                  speed.fast = false
+                  music.play("bgm/main.wma")
+              end
+              state.match = nil
+              state.wait_release = true
+          end
+          
+          local function escape_free(state)''')
+              source = replace(source, '    local touched, pause_held, fast_held = touch_gamepad.update(state.touch_gamepad,',
+                               '    local touched, pause_held, fast_held, back_held = touch_gamepad.update(state.touch_gamepad,')
+              source = replace(source, '    -- The pause button is F1;', '''    if back_held and not state.back_held and state.active == "match" then state.back_requested = true end
+              state.back_held = back_held
+              -- The pause button is F1;''')
+              source = replace(source, '        if input.keys[virtual_keys.escape] then\n', '''        -- During a network match, keep exchanging inputs until the local player confirms leaving.
+                  -- The dialog overlays the fight without pausing the remote peer.
+                  if input.keys[virtual_keys.escape] and not (state.quit_dialog and state.quit_dialog.kind == "back") then
+          ''')
+              source = replace(source, '        local answer = quit_dialog.update(state.quit_dialog, input, context)',
+                               '''        local answer = quit_dialog.update(state.quit_dialog, state.session and local_input or input, context)''')
+              # Save a local pointer snapshot before the network combine, which may use the other player's pointer.
+              source = replace(source, '    local local_keys = input.keys', '''    local local_keys = input.keys
+              local local_input = input
+              if state.session then
+                  local_input.pointer_x = input.pointer_x and input.pointer_x >= 0 and input.pointer_x or state.local_pointer_x or 0
+                  local_input.pointer_y = input.pointer_y and input.pointer_y >= 0 and input.pointer_y or state.local_pointer_y or 0
+                  state.local_pointer_x, state.local_pointer_y = local_input.pointer_x, local_input.pointer_y
+                  local_input.click = input.button and not state.local_button
+                  -- Commit edge state only when the synchronized frame is accepted.
+              end''')
+              source = replace(source, '            else input = combined end', '''            else
+                          input = combined
+                          state.local_button = local_input.button
+                      end''')
+              # A network update can wait across calls. Do not consume the back press before it is accepted.
+              source = replace(source, '    local joining_cli = ', '    local back_pressed = state.back_requested\n    state.back_requested = nil\n    local joining_cli = ')
+              source = replace(source, '        elseif answer == "exit" then', '''        elseif answer == "exit" and state.quit_dialog.kind == "back" then
+                      return_from_fight(state, context)
+                      state.quit_dialog, state.swallow_pointer, closed_now = nil, true, true
+                  elseif answer == "exit" then''')
+              source = replace(source, '    elseif escape_pressed and escape_free(state) then', '''    elseif back_pressed and state.active == "match" then
+                  state.quit_dialog = quit_dialog.create("back")
+              elseif escape_pressed and escape_free(state) then''')
+              source = replace(source, '    if not state.quit_dialog and not closed_now then route(state, input, context) end', '''    if not closed_now and (not state.quit_dialog or state.session) then
+                  route(state, input, context)
+                  if state.active ~= "match" and state.quit_dialog and state.quit_dialog.kind == "back" then
+                      state.quit_dialog = nil
+                  end
+              end''')
+              return source
+          
+          
+          def dialog(source):
+              source = replace(source, 'local kinds = {', '''local kinds = {
+              back = {title = "Leave this fight?", confirm = "Leave", stay = "Continue", variant = constants.font_variants.blue},''')
+          
+              source = replace(source, '    if not state.ready then', '''    if state.kind == "back" and not state.ready and input.button then return nil end
+              if not state.ready then''')
+              return replace(source, 'autofocus = true}', 'autofocus = state.kind ~= "back" or not input.click}')
+          
+          
+          def patch(source, output, check_identity=True):
+              edits = {UI + 'touch_gamepad.lua': gamepad, UI + 'flow.lua': flow, UI + 'quit_dialog.lua': dialog}
+              with ZipFile(source) as original, ZipFile(output, 'w') as updated:
+                  if check_identity:
+                      info = plistlib.loads(original.read(APP + 'Info.plist'))
+                      assert info['CFBundleIdentifier'] == 'io.github.retrogamehub.lf2ultimate'
+                      assert b'local primary_positions' in original.read(UI + 'touch_gamepad.lua')
+                  assert edits.keys() <= set(original.namelist())
+                  for entry in original.infolist():
+                      data = original.read(entry)
+                      if entry.filename in edits:
+                          data = edits[entry.filename](data.decode()).encode()
+                      updated.writestr(entry, data)
+              with ZipFile(source) as original, ZipFile(output) as updated:
+                  assert updated.testzip() is None
+                  assert original.namelist() == updated.namelist()
+                  assert {name for name in original.namelist() if original.read(name) != updated.read(name)} == edits.keys()
+          
+          
+          if __name__ == '__main__':
+              patch(*sys.argv[1:])
+          PY
+          (cd artifacts && sha256sum *.ipa > Ultimate-LF2-iOS-arm64-unsigned.ipa.sha256)
+      - name: Publish the return button IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-back-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜戰鬥返回鍵測試版" \
+            --notes "Tap the left arrow below Pause to leave a fight. Same independent bundle ID. Unsigned ARM64 IPA."
