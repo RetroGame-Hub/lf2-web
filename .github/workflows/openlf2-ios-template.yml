@@ -1,0 +1,65 @@
+name: Package Ultimate LF2 template fix IPA
+on:
+  push:
+    branches: [openlf2-ios-build]
+    paths: [.github/workflows/openlf2-ios-template.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      IPA: Ultimate-LF2-iOS-arm64-unsigned.ipa
+    steps:
+      - name: Download and verify the independent build
+        env:
+          SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-back-45747790399-1
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
+          curl -fsSL --retry 3 --max-time 60 "$SOURCE/$IPA.sha256" -o "$IPA.sha256"
+          sha256sum -c "$IPA.sha256"
+      - name: Restore the default Template fighter
+        run: |
+          mkdir -p artifacts
+          python3 - "$IPA" "artifacts/$IPA" <<'PY'
+          import plistlib
+          import sys
+          from zipfile import ZipFile
+          
+          source, output = sys.argv[1:]
+          app = 'Payload/openlf2.app/'
+          data = app + 'scripts/data-override/data/'
+          template = data + 'template.dat'
+          freeze = data + 'freeze.dat'
+          names = data + 'override-fighter-names.txt'
+          
+          with ZipFile(source) as original, ZipFile(output, 'w') as updated:
+              info = plistlib.loads(original.read(app + 'Info.plist'))
+              assert info['CFBundleIdentifier'] == 'io.github.retrogamehub.lf2ultimate'
+              assert original.read(template) == original.read(freeze)
+              mapping = original.read(names).splitlines(keepends=True)
+              filtered = [row for row in mapping if not row.startswith(b'data/template.dat\t')]
+              assert len(filtered) == len(mapping) - 1
+              for entry in original.infolist():
+                  if entry.filename != template:
+                      content = b''.join(filtered) if entry.filename == names else original.read(entry)
+                      updated.writestr(entry, content)
+          
+          with ZipFile(source) as original, ZipFile(output) as updated:
+              assert updated.testzip() is None
+              assert updated.namelist() == [name for name in original.namelist() if name != template]
+              assert all(original.read(name) == updated.read(name) for name in updated.namelist() if name != names)
+          PY
+          (cd artifacts && sha256sum *.ipa > Ultimate-LF2-iOS-arm64-unsigned.ipa.sha256)
+      - name: Publish the template fix IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-template-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜選角第一格修正版" \
+            --notes "Restore the default Template fighter without changing the battle return flow. Unsigned ARM64 IPA."
