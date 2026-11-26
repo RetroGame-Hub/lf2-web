@@ -1,0 +1,92 @@
+name: Package Ultimate LF2 Bandit-X IPA
+on:
+  push:
+    branches: [openlf2-ios-build]
+    paths: [.github/workflows/openlf2-ios-bandit-x.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      IPA: Ultimate-LF2-iOS-arm64-unsigned.ipa
+    steps:
+      - name: Download and verify the independent build
+        env:
+          SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-gameplay-fix-45752977200-1
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
+          curl -fsSL --retry 3 --max-time 60 "$SOURCE/$IPA.sha256" -o "$IPA.sha256"
+          sha256sum -c "$IPA.sha256"
+      - name: Restore the mod's translucent Bandit-X fighter
+        run: |
+          mkdir -p artifacts
+          python3 - "$IPA" "artifacts/$IPA" <<'PY'
+          import plistlib
+          import sys
+          from zipfile import ZipFile
+          
+          source, output = sys.argv[1:]
+          app = 'Payload/openlf2.app/'
+          data = app + 'scripts/data-override/'
+          game = app + 'scripts/base/game/'
+          template = data + 'data/template.dat'
+          backup = data + 'data/templatebu.dat'
+          
+          def replace_once(text, old, new):
+              assert text.count(old) == 1, old
+              return text.replace(old, new)
+          
+          with ZipFile(source) as original, ZipFile(output, 'w') as updated:
+              assert plistlib.loads(original.read(app + 'Info.plist'))['CFBundleIdentifier'] == 'io.github.retrogamehub.lf2ultimate'
+              assert template not in original.namelist()
+              fighter = original.read(backup)
+              key = b'SiuHungIsAGoodBearBecauseHeIsVeryGood'
+              decoded = bytes((byte - key[index % len(key)]) % 256 for index, byte in enumerate(fighter) if index >= 123)
+              assert b'name: Bandit-X' in decoded and b'hit_Da: 240' in decoded
+              for filename in ('bandit_0b.bmp', 'bandit_1b.bmp', 'bandit_f.bmp', 'bandit_s.bmp'):
+                  assert original.read(data + 'sprite/sys/' + filename).startswith(b'BM')
+              catalog = game + 'catalog.lua'
+              objects = game + 'object_data.lua'
+              effect = data + 'sprite/sys/s-davis_lr.bmp'
+              assert int.from_bytes(original.read(effect)[18:22], 'little') == 320
+              edits = {
+                  catalog: replace_once(original.read(catalog).decode(),
+                      'portrait = path == "data/template.dat" and "sprite/template1/face.bmp" or canonical(portrait),',
+                      'portrait = canonical(portrait),').encode(),
+                  objects: replace_once(replace_once(original.read(objects).decode(),
+                      '''        if path == "data/template.dat" then
+                      data.head = "sprite/template1/face.bmp"
+                      data.small = "sprite/template1/s.bmp"
+                      data.ultimate_template = true
+                  end
+          ''', ''), '''    if data.ultimate_template and picture >= 0 and picture < 140 then
+                  local cell = picture % 70
+                  return picture < 70 and "sprite/template1/0.bmp" or "sprite/template1/1.bmp",
+                      {(cell % 10) * 80, math.floor(cell / 10) * 80, 79, 79}
+              end
+          ''', '').encode(),
+              }
+              for entry in original.infolist():
+                  updated.writestr(entry, edits[entry.filename] if entry.filename in edits else original.read(entry))
+              updated.writestr(template, fighter, compress_type=original.getinfo(backup).compress_type)
+          
+          with ZipFile(source) as original, ZipFile(output) as updated:
+              assert updated.testzip() is None
+              assert updated.namelist() == original.namelist() + [template]
+              assert updated.read(template) == original.read(backup)
+              assert {name for name in original.namelist() if updated.read(name) != original.read(name)} == edits.keys()
+          PY
+          (cd artifacts && sha256sum *.ipa > Ultimate-LF2-iOS-arm64-unsigned.ipa.sha256)
+      - name: Publish the Bandit-X IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-bandit-x-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜半透明 Bandit-X 修正版" \
+            --notes "Restore the mod's original Bandit-X moves and translucent sprites in the first fighter slot. Unsigned ARM64 IPA."
