@@ -138,7 +138,7 @@ jobs:
               source = replace(source, '    elseif escape_pressed and escape_free(state) then', '''    elseif back_pressed and state.active == "match" then
                   state.quit_dialog = quit_dialog.create("back")
               elseif escape_pressed and escape_free(state) then''')
-              source = replace(source, '    if not state.quit_dialog and not closed_now then route(state, input, context) end', '''    if not closed_now and (not state.quit_dialog or state.session) then
+              source = replace(source, '    if not state.quit_dialog and not closed_now then route(state, input, context) end', '''    if state.session or (not state.quit_dialog and not closed_now) then
                   route(state, input, context)
                   if state.active ~= "match" and state.quit_dialog and state.quit_dialog.kind == "back" then
                       state.quit_dialog = nil
