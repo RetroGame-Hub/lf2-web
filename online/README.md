@@ -1,14 +1,14 @@
 # 終極 LF2 iOS 野團測試
 
-兩台 iPhone 安裝同一版「終極 LF2 連線測試」。在連線選單進入 **Quick Match**，輸入相同的中繼伺服器 IPv4 位址，可附上連接埠，然後按 **Match**。伺服器依相同版本的連線識別配對。配對後進入原有的連線遊戲選單。
+兩台 iPhone 安裝同一版「終極 LF2 連線測試」。在連線選單按 **Quick Match**，App 會連到 Railway 中繼 `viaduct.proxy.rlwy.net:59934`。伺服器依相同版本的連線識別配對，成功後會進入原有的連線遊戲選單。
 
-測試伺服器可用 Python 3.10 以上啟動。
+原有 IP 直連可從 **Waiting for Opponent** 和 **Connect to Opponent** 進入。
+
+本機可用 Python 3.10 以上啟動中繼。發布版 App 的 Quick Match 仍會使用預設的 Railway 入口。
 
 ```sh
 python3 online/relay.py
 ```
-
-同網路測試時請輸入伺服器的區域網路位址。跨網路測試需要將 TCP 12346 對外開放，或使用指向此連接埠的 TCP 代理，再把公開 IPv4 和連接埠填入 App。中繼使用和遊戲相同的 TCP 資料流，目前適合受控測試。
 
 Docker 部署可用 `online` 作為 build context。
 

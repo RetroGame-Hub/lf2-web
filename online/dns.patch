@@ -1,0 +1,137 @@
+diff --git a/src/adapters/network/transport.cpp b/src/adapters/network/transport.cpp
+index 9ea4fad..0d64503 100644
+--- a/src/adapters/network/transport.cpp
++++ b/src/adapters/network/transport.cpp
+@@ -4,7 +4,11 @@
+ #include "openlf2/ports/network.hpp"
+ #include <array>
+ #include <cerrno>
++#include <chrono>
++#include <cstring>
++#include <future>
+ #include <string>
++#include <thread>
+ #include <utility>
+ #ifdef _WIN32
+ #ifndef NOMINMAX
+@@ -15,6 +19,7 @@
+ #else
+ #include <arpa/inet.h>
+ #include <fcntl.h>
++#include <netdb.h>
+ #include <netinet/in.h>
+ #include <netinet/tcp.h>
+ #include <poll.h>
+@@ -111,6 +116,34 @@ Result<sockaddr_in> endpoint(std::string_view address, std::uint16_t port) {
+     }
+     return result;
+ }
++struct ConnectAddress {
++    sockaddr_storage address{};
++    SocketLength length{};
++};
++
++Result<ConnectAddress> resolve_peer(const std::string& host, std::uint16_t port) {
++    addrinfo hints{};
++    hints.ai_family = AF_UNSPEC;
++    hints.ai_socktype = SOCK_STREAM;
++    hints.ai_protocol = IPPROTO_TCP;
++    hints.ai_flags = AI_NUMERICSERV;
++    addrinfo* records = nullptr;
++    const auto service = std::to_string(port);
++    if (getaddrinfo(host.c_str(), service.c_str(), &hints, &records) != 0) {
++        return fail(ErrorCode::io, "Could not resolve matchmaking server");
++    }
++    const std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> results(records, freeaddrinfo);
++    for (auto* entry = records; entry; entry = entry->ai_next) {
++        ConnectAddress target{};
++        if ((entry->ai_family != AF_INET && entry->ai_family != AF_INET6) ||
++            entry->ai_addrlen > sizeof(target.address)) continue;
++        std::memcpy(&target.address, entry->ai_addr, entry->ai_addrlen);
++        target.length = static_cast<SocketLength>(entry->ai_addrlen);
++        return target;
++    }
++    return fail(ErrorCode::io, "No address found for matchmaking server");
++}
++
+ class TcpTransport final : public NetworkTransport {
+ public:
+     Result<void> initialize() { return session_.start(); }
+@@ -141,16 +174,25 @@ public:
+     Result<void> connect(std::string_view address, std::uint16_t port) override {
+         close();
+         if (port == 0) return fail(ErrorCode::format, "Network peer port must be nonzero");
+-        auto target = endpoint(address, port);
+-        if (!target) return std::unexpected(target.error());
+-        Socket connection(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+-        if (connection.get() == invalid_socket) return socket_error("socket");
+-        auto configured = configure(connection);
+-        if (!configured) return configured;
+-        const auto result = ::connect(connection.get(), reinterpret_cast<const sockaddr*>(&*target), sizeof(*target));
+-        if (result != 0 && !pending(last_error())) return socket_error("connect");
+-        socket_ = std::move(connection);
+-        status_ = result == 0 ? NetworkStatus::connected : NetworkStatus::connecting;
++        if (auto target = endpoint(address, port)) {
++            return connect_to(reinterpret_cast<const sockaddr*>(&*target), sizeof(*target));
++        }
++        if (address.empty() || address.size() > 253 || address.find_first_not_of(
++                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") != std::string_view::npos ||
++            address.find_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") == std::string_view::npos) {
++            return fail(ErrorCode::format, "Invalid network peer address");
++        }
++        // Keep DNS off the game thread. The worker owns only the hostname and result.
++        try {
++            std::packaged_task<Result<ConnectAddress>()> resolve(
++                [host = std::string(address), port] { return resolve_peer(host, port); });
++            auto result = resolve.get_future();
++            std::thread(std::move(resolve)).detach();
++            resolving_ = std::move(result);
++        } catch (const std::system_error&) {
++            return fail(ErrorCode::platform, "Could not start matchmaking DNS lookup");
++        }
++        status_ = NetworkStatus::connecting;
+         return {};
+     }
+     Result<void> send(std::span<const char> bytes) override {
+@@ -166,6 +208,7 @@ public:
+     }
+     void close() noexcept override {
+         socket_.reset();
++        resolving_ = {};
+         outgoing_.clear();
+         status_ = NetworkStatus::idle;
+         port_ = 0;
+@@ -173,7 +216,25 @@ public:
+     NetworkStatus status() const noexcept override { return status_; }
+     std::uint16_t local_port() const noexcept override { return port_; }
+ private:
++    Result<void> connect_to(const sockaddr* target, SocketLength length) {
++        Socket connection(::socket(target->sa_family, SOCK_STREAM, IPPROTO_TCP));
++        if (connection.get() == invalid_socket) return socket_error("socket");
++        auto configured = configure(connection);
++        if (!configured) return configured;
++        const auto result = ::connect(connection.get(), target, length);
++        if (result != 0 && !pending(last_error())) return socket_error("connect");
++        socket_ = std::move(connection);
++        status_ = result == 0 ? NetworkStatus::connected : NetworkStatus::connecting;
++        return {};
++    }
+     Result<Bytes> progress() {
++        if (resolving_.valid()) {
++            if (resolving_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return Bytes{};
++            auto target = resolving_.get();
++            if (!target) return std::unexpected(target.error());
++            auto connected = connect_to(reinterpret_cast<const sockaddr*>(&target->address), target->length);
++            if (!connected) return std::unexpected(connected.error());
++        }
+         if (status_ == NetworkStatus::idle) return Bytes{};
+         if (status_ == NetworkStatus::listening) {
+             Socket peer(::accept(socket_.get(), nullptr, nullptr));
+@@ -243,6 +304,7 @@ private:
+     static constexpr std::size_t buffer_limit = 65536;
+     SocketSession session_; // destroyed after sockets
+     Socket socket_;
++    std::future<Result<ConnectAddress>> resolving_;
+     NetworkStatus status_ = NetworkStatus::idle;
+     std::uint16_t port_ = 0;
+     Bytes outgoing_;

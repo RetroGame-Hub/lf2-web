@@ -2,7 +2,7 @@ name: Package Ultimate LF2 iOS matchmaking beta
 on:
   push:
     branches: [openlf2-ios-online]
-    paths: [.github/workflows/openlf2-ios-online.yml, online/patch.py]
+    paths: [.github/workflows/openlf2-ios-online.yml, online/patch.py, online/dns.patch]
   workflow_dispatch:
 
 permissions:
@@ -10,24 +10,37 @@ permissions:
 
 jobs:
   package:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: macos-15
+    timeout-minutes: 120
     env:
       SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-bandit-x-45793272647-1
       BASE_IPA: Ultimate-LF2-iOS-arm64-unsigned.ipa
       IPA: Ultimate-LF2-Online-iOS-arm64-unsigned.ipa
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the iOS engine with hostname support
+        run: |
+          git clone --depth 1 --branch v1.2.0 https://github.com/OpenLF2/OpenLF2.git upstream
+          test "$(git -C upstream rev-parse HEAD)" = 6942db7cfaddf2e65eb45e4a4d4632120dc968f7
+          git -C upstream apply "$GITHUB_WORKSPACE/OpenLF2-v1.2.0-data-override.patch"
+          git -C upstream apply "$GITHUB_WORKSPACE/online/dns.patch"
+          python3 -m pip install 'conan==2.32.0'
+          (cd upstream && bash dist/build-apple.sh ios-device-arm64)
+          unzip -p upstream/out/OpenLF2-iOS-arm64-unsigned.ipa Payload/openlf2.app/openlf2 > "$RUNNER_TEMP/openlf2"
+          xcrun lipo -archs "$RUNNER_TEMP/openlf2" | grep -Fx arm64
       - name: Verify the single-player build
         run: |
           curl -fsSL --retry 3 --max-time 120 "$SOURCE/$BASE_IPA" -o "$BASE_IPA"
           curl -fsSL --retry 3 --max-time 60 "$SOURCE/$BASE_IPA.sha256" -o "$BASE_IPA.sha256"
-          sha256sum -c "$BASE_IPA.sha256"
+          shasum -a 256 -c "$BASE_IPA.sha256"
       - name: Package matchmaking beta
         run: |
           mkdir -p artifacts
-          python3 online/patch.py "$BASE_IPA" "artifacts/$IPA"
-          (cd artifacts && sha256sum "$IPA" > "$IPA.sha256")
+          python3 online/patch.py "$BASE_IPA" "artifacts/$IPA" "$RUNNER_TEMP/openlf2"
+          (cd artifacts && shasum -a 256 "$IPA" > "$IPA.sha256")
       - name: Publish the independent test build
         env:
           GH_TOKEN: ${{ github.token }}
@@ -35,4 +48,4 @@ jobs:
           gh release create "ultimate-lf2-ios-online-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
             --title "終極 LF2 iOS｜野團配對測試版" \
-            --notes "Quick Match requires a running OpenLF2 relay. See online/README.md on openlf2-ios-online. This unsigned IPA has a separate bundle ID."
+            --notes "Quick Match automatically connects to the Railway matchmaking relay. Direct IP play is available from the network menu. This unsigned IPA has a separate bundle ID."
