@@ -1,0 +1,83 @@
+name: Package Ultimate LF2 Android ARM64 APK
+on:
+  push:
+    branches: [openlf2-android-prep]
+    paths: [.github/workflows/openlf2-android-apk.yml]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Fetch verified Android build inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: Ultimate-LF2-Android-arm64-build-inputs
+          run-id: 45930509253
+          github-token: ${{ github.token }}
+          path: prepared
+      - name: Restore the Gradle project
+        working-directory: prepared
+        run: |
+          sha256sum -c Ultimate-LF2-Android-arm64-build-inputs.tar.gz.sha256
+          tar -xzf Ultimate-LF2-Android-arm64-build-inputs.tar.gz
+      - name: Install Android SDK and build tools
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Build and validate the signed test APK
+        run: |
+          gradle --no-daemon -p prepared/android assembleDebug
+          mkdir -p artifacts
+          apk=artifacts/Ultimate-LF2-Android-arm64.apk
+          cp prepared/android/app/build/outputs/apk/debug/app-debug.apk "$apk"
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$tools/apksigner" verify --verbose --print-certs "$apk"
+          "$tools/aapt" dump badging "$apk" > apk-badging.txt
+          grep -F "package: name='io.github.retrogamehub.lf2ultimate.network'" apk-badging.txt
+          grep -Fx "native-code: 'arm64-v8a'" apk-badging.txt
+          python3 - "$apk" <<'PYTHON'
+          import struct
+          import sys
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          root = Path("prepared/build/android")
+          with ZipFile(sys.argv[1]) as apk:
+              assert apk.testzip() is None
+              for directory, prefix in (("assets/scripts", "assets/scripts"), ("jniLibs", "lib")):
+                  source = root / directory
+                  files = [path for path in source.rglob("*") if path.is_file()]
+                  assert files, directory
+                  for path in files:
+                      target = f"{prefix}/{path.relative_to(source).as_posix()}"
+                      payload = apk.read(target)
+                      if directory == "jniLibs":
+                          # Gradle can strip debug symbols from native libraries.
+                          assert payload[:5] == b"\x7fELF\x02", target
+                          assert struct.unpack_from("<H", payload, 18)[0] == 183, target
+                      else:
+                          assert payload == path.read_bytes(), target
+          print("The signed APK contains the verified native ARM64 libraries and all staged game scripts and data.")
+          PYTHON
+          (cd artifacts && sha256sum Ultimate-LF2-Android-arm64.apk > Ultimate-LF2-Android-arm64.apk.sha256)
+      - name: Publish the Android beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-android-arm64-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2｜Android ARM64 好友房測試版" \
+            --notes "Signed test APK for Android ARM64. It includes six-digit friend rooms and Quick Match. Android-to-iPhone play still requires device testing."
