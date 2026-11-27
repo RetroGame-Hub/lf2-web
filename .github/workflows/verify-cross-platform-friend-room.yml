@@ -1,0 +1,37 @@
+name: Verify Android and iOS compatibility against the live relay
+on:
+  push:
+    branches: [openlf2-android-prep]
+    paths: [.github/workflows/verify-cross-platform-friend-room.yml]
+permissions: {}
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Pair the matching Android and iOS profiles in a fresh private room
+        run: |
+          python3 - <<'PY'
+          import socket
+
+          endpoint = ('viaduct.proxy.rlwy.net', 59934)
+          profile = b'OpenLF2 TCP 1\n' + b'e8e2a733e6c6da152085d01a988da6bbb7d78b4cc1e9cf93d512b7115f25235b'
+          old = b'OpenLF2 TCP 1\n' + b'4f86c63810f5711db6f433a3c9234b65c33d78635f7b36802162633d68cc1948'
+
+          with socket.create_connection(endpoint, 8) as host, host.makefile('rb') as host_in:
+              host.sendall(b'C' + profile)
+              reply = host_in.read(7)
+              assert len(reply) == 7 and reply[:1] == b'R' and reply[1:].isdigit(), reply
+              with socket.create_connection(endpoint, 8) as previous:
+                  previous.sendall(b'J' + old + reply[1:])
+                  assert previous.recv(1) == b'X'
+              with socket.create_connection(endpoint, 8) as guest, guest.makefile('rb') as guest_in:
+                  guest.sendall(b'J' + profile + reply[1:])
+                  assert host_in.read(1) == b'H'
+                  assert guest_in.read(1) == b'G'
+                  host.sendall(b'ping')
+                  assert guest_in.read(4) == b'ping'
+                  guest.sendall(b'pong')
+                  assert host_in.read(4) == b'pong'
+          print('The live relay accepted the aligned profiles and forwarded data in both directions.')
+          PY
