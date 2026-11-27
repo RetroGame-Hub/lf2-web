@@ -1,0 +1,56 @@
+diff --git a/android/app/build.gradle b/android/app/build.gradle
+index ca5b4bc..0383ba9 100644
+--- a/android/app/build.gradle
++++ b/android/app/build.gradle
+@@ -7,7 +7,7 @@ android {
+     compileSdk 35
+ 
+     defaultConfig {
+-        applicationId 'io.github.openlf2.openlf2'
++        applicationId 'io.github.retrogamehub.lf2ultimate.network'
+         minSdk 21
+         targetSdk 35
+         versionCode project.findProperty('openlf2VersionCode')?.toInteger() ?: 11
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+index 469d358..00a3558 100644
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -4,7 +4,7 @@
+     <uses-permission android:name="android.permission.VIBRATE" />
+     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+-    <application android:label="OpenLF2" android:icon="@mipmap/ic_launcher" android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
++    <application android:label="終極 LF2 連線測試" android:icon="@mipmap/ic_launcher" android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+         android:hasCode="true" android:extractNativeLibs="true">
+         <activity android:name=".OpenLF2Activity" android:exported="true"
+             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode"
+diff --git a/android/app/src/main/java/io/github/openlf2/openlf2/OpenLF2Activity.java b/android/app/src/main/java/io/github/openlf2/openlf2/OpenLF2Activity.java
+index 6afba28..3adbf59 100644
+--- a/android/app/src/main/java/io/github/openlf2/openlf2/OpenLF2Activity.java
++++ b/android/app/src/main/java/io/github/openlf2/openlf2/OpenLF2Activity.java
+@@ -39,7 +39,8 @@ public final class OpenLF2Activity extends SDLActivity {
+      */
+     @Override
+     protected String[] getArguments() {
+-        return new String[] {getFilesDir().getAbsolutePath()};
++        // The iOS network profile is generated with JIT disabled.
++        return new String[] {getFilesDir().getAbsolutePath(), "--no-jit"};
+     }
+ 
+     private void copyAssetTree(String assetPath, File destination) throws IOException {
+diff --git a/dist/build-android.sh b/dist/build-android.sh
+index 23c1050..7f7d719 100644
+--- a/dist/build-android.sh
++++ b/dist/build-android.sh
+@@ -127,6 +127,11 @@ cp -R "$root/scripts" "$root/build/android/assets/scripts"
+ python3 dist/collect-licenses.py "$root/build/android/assets/licenses" \
+     --key ffmpeg --key ffmpeg-notes --key sdl3 --key sdl3-ttf --key freetype --key luajit --key zlib --key bzip2 \
+     --key openssl --key libcurl --local "ndk-runtime=$ndk/NOTICE"
++if [[ "${OPENLF2_ANDROID_PREPARE_ONLY:-0}" == 1 ]]; then
++    echo "Android packaging inputs are ready in build/android; Gradle was not run."
++    exit 0
++fi
++
+ build_type="${OPENLF2_ANDROID_BUILD_TYPE:-debug}"
+ case "$build_type" in
+     debug|release) ;;

@@ -1,0 +1,68 @@
+name: Prepare Ultimate LF2 Android build inputs
+on:
+  push:
+    branches: [openlf2-android-prep]
+    paths: [.github/workflows/openlf2-android-prepare.yml, 'android-port/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-friend-rooms-45927582249-1/Ultimate-LF2-Online-iOS-arm64-unsigned.ipa
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install the Android SDK, NDK and native build tools
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platforms;android-35' 'build-tools;35.0.0' 'ndk;28.2.13676358'
+          python3 -m venv "$RUNNER_TEMP/conan-venv"
+          "$RUNNER_TEMP/conan-venv/bin/pip" install 'conan==2.32.0'
+          echo "$RUNNER_TEMP/conan-venv/bin" >> "$GITHUB_PATH"
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config
+      - name: Prepare the pinned OpenLF2 source and verified game assets
+        run: |
+          git clone --depth 1 --branch v1.2.0 https://github.com/OpenLF2/OpenLF2.git upstream
+          test "$(git -C upstream rev-parse HEAD)" = 6942db7cfaddf2e65eb45e4a4d4632120dc968f7
+          git -C upstream apply "$GITHUB_WORKSPACE/OpenLF2-v1.2.0-data-override.patch" \
+            "$GITHUB_WORKSPACE/online/dns.patch" "$GITHUB_WORKSPACE/android-port/android.patch"
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE" -o source.ipa
+          python3 android-port/stage_scripts.py source.ipa upstream
+      - name: Compile ARM64 libraries and stage all inputs before Gradle
+        working-directory: upstream
+        env:
+          OPENLF2_ANDROID_PREPARE_ONLY: '1'
+        run: |
+          bash dist/build-android.sh arm64-v8a
+          test -z "$(find out android -type f -name '*.apk' -print -quit)"
+          test -s build/android/jniLibs/arm64-v8a/libmain.so
+          test -s build/android/jniLibs/arm64-v8a/libSDL3.so
+          test -s build/android/assets/scripts/data-override/data/stage.dat
+          diff -qr scripts build/android/assets/scripts
+          for library in build/android/jniLibs/arm64-v8a/*.so; do
+            readelf -h "$library" | grep -q 'Machine:.*AArch64'
+          done
+      - name: Archive the prepared Gradle project and staged inputs
+        run: |
+          tar -C upstream -czf Ultimate-LF2-Android-arm64-build-inputs.tar.gz \
+            android build/android/assets build/android/jniLibs build/android/res build/android/sdl-java
+          sha256sum Ultimate-LF2-Android-arm64-build-inputs.tar.gz \
+            > Ultimate-LF2-Android-arm64-build-inputs.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ultimate-LF2-Android-arm64-build-inputs
+          path: |
+            Ultimate-LF2-Android-arm64-build-inputs.tar.gz
+            Ultimate-LF2-Android-arm64-build-inputs.tar.gz.sha256
+          compression-level: 0
+          if-no-files-found: error
