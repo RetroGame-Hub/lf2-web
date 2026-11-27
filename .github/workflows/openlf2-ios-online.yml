@@ -1,0 +1,38 @@
+name: Package Ultimate LF2 iOS matchmaking beta
+on:
+  push:
+    branches: [openlf2-ios-online]
+    paths: [.github/workflows/openlf2-ios-online.yml, online/patch.py]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-bandit-x-45793272647-1
+      BASE_IPA: Ultimate-LF2-iOS-arm64-unsigned.ipa
+      IPA: Ultimate-LF2-Online-iOS-arm64-unsigned.ipa
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the single-player build
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$BASE_IPA" -o "$BASE_IPA"
+          curl -fsSL --retry 3 --max-time 60 "$SOURCE/$BASE_IPA.sha256" -o "$BASE_IPA.sha256"
+          sha256sum -c "$BASE_IPA.sha256"
+      - name: Package matchmaking beta
+        run: |
+          mkdir -p artifacts
+          python3 online/patch.py "$BASE_IPA" "artifacts/$IPA"
+          (cd artifacts && sha256sum "$IPA" > "$IPA.sha256")
+      - name: Publish the independent test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-online-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜野團配對測試版" \
+            --notes "Quick Match requires a running OpenLF2 relay. See online/README.md on openlf2-ios-online. This unsigned IPA has a separate bundle ID."
