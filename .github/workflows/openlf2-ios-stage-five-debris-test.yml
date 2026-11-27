@@ -1,0 +1,76 @@
+name: Package the iOS Stage 5 debris fix test
+on:
+  push:
+    branches: [openlf2-ios-online]
+    paths: [.github/workflows/openlf2-ios-stage-five-debris-test.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-stage-five-diagnostic-46084180047-1
+      IPA: Ultimate-LF2-Online-iOS-arm64-unsigned.ipa
+    steps:
+      - name: Download the logging-enabled iOS engine and verify the checksum
+        run: |
+          for attempt in {1..24}; do
+            if curl -fsSL --max-time 15 "$SOURCE/$IPA.sha256" -o "$IPA.sha256"; then
+              break
+            fi
+            sleep 15
+          done
+          test -s "$IPA.sha256"
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
+          sha256sum -c "$IPA.sha256"
+      - name: Skip drawing debris that is far outside the viewport
+        run: |
+          mkdir -p artifacts
+          python3 - "$IPA" "artifacts/$IPA" <<'PY'
+          import plistlib
+          import sys
+          from zipfile import ZipFile
+
+          original_path, output_path = sys.argv[1:]
+          app = 'Payload/openlf2.app/'
+          screen = app + 'scripts/base/ui/match_screen.lua'
+          before = '    local camera = view.camera\n    -- The sprite, shadow'
+          after = '''    local camera = view.camera
+              local anchor_x = entry.draw_offset + entry.x - camera
+              if entry.record.id == constants.object_ids.broken_weapon then
+                  -- Fast debris can leave the renderer's coordinate range before its animation ends.
+                  -- Keep one viewport of margin for shadows and interpolated movement at the edges.
+                  local left = bounds and bounds.left or 0
+                  local right = bounds and bounds.right or constants.screen.width
+                  local margin = right - left
+                  if anchor_x < left - margin or anchor_x > right + margin then return end
+              end
+              -- The sprite, shadow'''
+          before_motion = 'context.motion(entry.index, entry.draw_offset + entry.x - camera, entry.z + entry.y)'
+          after_motion = 'context.motion(entry.index, anchor_x, entry.z + entry.y)'
+
+          with ZipFile(original_path) as original, ZipFile(output_path, 'w') as output:
+              info = plistlib.loads(original.read(app + 'Info.plist'))
+              assert info['CFBundleIdentifier'] == 'io.github.retrogamehub.lf2ultimate.network'
+              assert info.get('UIFileSharingEnabled') and b'LF2-stage5-errors.txt' in original.read(app + 'openlf2')
+              source = original.read(screen).decode()
+              assert source.count(before) == source.count(before_motion) == 1
+              patched = source.replace(before, after).replace(before_motion, after_motion).encode()
+              for entry in original.infolist():
+                  output.writestr(entry, patched if entry.filename == screen else original.read(entry))
+          with ZipFile(original_path) as original, ZipFile(output_path) as output:
+              assert output.testzip() is None and output.namelist() == original.namelist()
+              assert [p for p in original.namelist() if original.read(p) != output.read(p)] == [screen]
+          PY
+          (cd artifacts && sha256sum "$IPA" > "$IPA.sha256")
+      - name: Publish the separate debris fix test IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-stage-five-debris-test-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜第 5 關碎冰閃退修補測試" \
+            --notes "Stage 5 test: skip rendering far-offscreen debris while retaining the ice attack and simulation. Engine errors are written locally to Documents/LF2-stage5-errors.txt. Unsigned ARM64 IPA. Use the standard builds for Android-to-iOS play."
