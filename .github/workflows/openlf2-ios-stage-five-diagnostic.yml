@@ -1,0 +1,105 @@
+name: Package a local-log Stage 5 diagnostic IPA
+on:
+  push:
+    branches: [openlf2-ios-online]
+    paths: [.github/workflows/openlf2-ios-stage-five-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-stage-five-test-46046152238-1
+      IPA: Ultimate-LF2-Online-iOS-arm64-unsigned.ipa
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the iOS engine with local error logging
+        run: |
+          git clone --depth 1 --branch v1.2.0 https://github.com/OpenLF2/OpenLF2.git upstream
+          test "$(git -C upstream rev-parse HEAD)" = 6942db7cfaddf2e65eb45e4a4d4632120dc968f7
+          git -C upstream apply "$GITHUB_WORKSPACE/OpenLF2-v1.2.0-data-override.patch" "$GITHUB_WORKSPACE/online/dns.patch"
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('upstream/src/core/log.cpp')
+          contents = source.read_text()
+          includes = '#include <iostream>'
+          output = "        std::cerr << text << '\\n';"
+          assert contents.count(includes) == contents.count(output) == 1
+          contents = contents.replace(includes, includes + '''
+          #if defined(__APPLE__)
+          #include <TargetConditionals.h>
+          #if TARGET_OS_IOS
+          #include <cstdlib>
+          #include <filesystem>
+          #include <fstream>
+          #include <mutex>
+          #endif
+          #endif
+          ''')
+          contents = contents.replace(output, output + '''
+          #if defined(__APPLE__) && TARGET_OS_IOS
+                  if (level == LogLevel::error) {
+                      const char* home = std::getenv("CFFIXED_USER_HOME");
+                      if (!home || !*home) home = std::getenv("HOME");
+                      if (home && *home) {
+                          static std::mutex mutex;
+                          const std::lock_guard lock(mutex);
+                          const auto path = std::filesystem::path(home) / "Documents" / "LF2-stage5-errors.txt";
+                          std::error_code ec;
+                          const auto size = std::filesystem::file_size(path, ec);
+                          const auto mode = !ec && size >= 65536 ? std::ios::trunc : std::ios::app;
+                          std::ofstream trace(path, mode);
+                          trace << text << '\\n';
+                      }
+                  }
+          #endif
+          ''')
+          source.write_text(contents)
+          PY
+          python3 -m pip install 'conan==2.32.0'
+          (cd upstream && bash dist/build-apple.sh ios-device-arm64)
+          unzip -p upstream/out/OpenLF2-iOS-arm64-unsigned.ipa Payload/openlf2.app/openlf2 > "$RUNNER_TEMP/openlf2"
+          xcrun lipo -archs "$RUNNER_TEMP/openlf2" | grep -Fx arm64
+          grep -aq 'LF2-stage5-errors.txt' "$RUNNER_TEMP/openlf2"
+      - name: Insert the diagnostic engine without changing gameplay data
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
+          printf '%s  %s\n' f321a513930938a7d80c333c2f02d1a6071c907305a8f724d97c488edf18e193 "$IPA" | shasum -a 256 -c -
+          mkdir -p artifacts
+          python3 - "$IPA" "artifacts/$IPA" "$RUNNER_TEMP/openlf2" <<'PY'
+          import plistlib
+          import sys
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          source, output, executable = sys.argv[1:]
+          app = 'Payload/openlf2.app/'
+          plist, binary = app + 'Info.plist', app + 'openlf2'
+          with ZipFile(source) as original, ZipFile(output, 'w') as modified:
+              info = plistlib.loads(original.read(plist))
+              assert info['CFBundleIdentifier'] == 'io.github.retrogamehub.lf2ultimate.network'
+              info.update(UIFileSharingEnabled=True, LSSupportsOpeningDocumentsInPlace=True)
+              edits = {plist: plistlib.dumps(info), binary: Path(executable).read_bytes()}
+              for entry in original.infolist():
+                  modified.writestr(entry, edits[entry.filename] if entry.filename in edits else original.read(entry))
+          with ZipFile(source) as original, ZipFile(output) as modified:
+              assert modified.testzip() is None
+              assert original.namelist() == modified.namelist()
+              assert {name for name in modified.namelist() if original.read(name) != modified.read(name)} == edits.keys()
+          PY
+          (cd artifacts && shasum -a 256 "$IPA" > "$IPA.sha256")
+      - name: Publish the separate diagnostic IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-stage-five-diagnostic-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜第 5 關閃退診斷版" \
+            --notes "Unsigned ARM64 diagnostic build. Engine-reported errors are saved locally in Documents/LF2-stage5-errors.txt. No telemetry. Stage 5 gameplay and assets match the prior sprite test."
