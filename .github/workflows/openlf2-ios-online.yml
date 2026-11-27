@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ultimate-lf2-ios-online-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   package:
     runs-on: macos-15
@@ -21,6 +25,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Test the public relay from outside Railway
+        continue-on-error: true
+        run: |
+          python3 - <<'PYTHON'
+          import secrets
+          import socket
+
+          endpoint = ("viaduct.proxy.rlwy.net", 59934)
+          profile = b"OpenLF2 TCP 1\n" + secrets.token_hex(32).encode()
+          with socket.create_connection(endpoint, 10) as first, socket.create_connection(endpoint, 10) as second:
+              first.sendall(profile)
+              second.sendall(profile)
+              roles = {first.recv(1): first, second.recv(1): second}
+              assert set(roles) == {b"H", b"G"}, "Relay did not assign complementary roles"
+              roles[b"H"].sendall(b"ping")
+              assert roles[b"G"].makefile("rb").read(4) == b"ping", "Relay did not forward host bytes"
+              roles[b"G"].sendall(b"pong")
+              assert roles[b"H"].makefile("rb").read(4) == b"pong", "Relay did not forward guest bytes"
+          print("Public relay paired two clients and forwarded traffic in both directions")
+          PYTHON
       - name: Build the iOS engine with hostname support
         run: |
           git clone --depth 1 --branch v1.2.0 https://github.com/OpenLF2/OpenLF2.git upstream
