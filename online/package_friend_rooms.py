@@ -1,4 +1,6 @@
-"""Add the friend-room client to the verified iOS Quick Match package."""
+"""Add friend rooms and the IPv4 touch keypad to the iOS Quick Match package."""
+from pathlib import Path
+import plistlib
 import sys
 from zipfile import ZipFile
 
@@ -179,11 +181,54 @@ end
     end''')
 
 
+def direct_ip_keypad(source):
+    # Reuse the standalone lobby's keypad without overwriting the friend-room UI.
+    keypad = (Path(__file__).resolve().parents[1] / 'ios-network/network.lua').read_text(encoding='utf-8')
+
+    def section(script, start, end, *, after=''):
+        first = script.index(start, script.index(after)) if after else script.index(start)
+        return script[first:script.index(end, first + len(start))]
+
+    nav_start = 'local function navigation_spec(page)'
+    join_navigation = '    if page == "join" then\n'
+    choice_targets = '    return {page = page, targets = {target(0x104,'
+    source = replace(source, nav_start, section(keypad, '-- The IPv4 field', nav_start) + nav_start)
+    source = replace(source, section(source, join_navigation, choice_targets),
+                     section(keypad, join_navigation, choice_targets))
+    source = replace(source, '-- The clickable areas for keyboard and controller navigation (base/ui/navigation); the join\n'
+                     '-- page starts on its Connect button so Enter connects at once, as it always did.\n', '')
+
+    keypad_update = section(keypad, '        for _, target in ipairs(keypad) do\n', '    else\n        cancel =')
+    # Enter and controller A activate the highlighted button through navigation.apply.
+    keypad_update = replace(keypad_update,
+                            '        if not cancel and (flow_input.keys[virtual_keys.enter] and not state.previous_keys[virtual_keys.enter]\n'
+                            '           or hit(input, connect)) then', '        if not cancel and hit(input, connect) then')
+    source = replace(source, section(source, '        -- Text a soft keyboard', '    else\n        cancel ='), keypad_update)
+    source = replace(source, ', keyboard = false', '')
+    source = replace(source, section(source, '    -- The on-screen keyboard follows', '    for _, sound'), '')
+    source = replace(source, '            state.page = "join"\n', '            state.page, state.message = "join", nil\n'
+                     '            context.text_input(false)\n')
+
+    join_draw = '    elseif state.page == "join" then\n'
+    choice_draw = '    else\n'
+    source = replace(source, section(source, join_draw, choice_draw, after='function screen.draw'),
+                     section(keypad, join_draw, choice_draw, after='function screen.draw'))
+    return replace(source, '            ["Enter a 6-digit room code"] = "請輸入六位數房號",',
+                   '            ["Enter a 6-digit room code"] = "請輸入六位數房號",\n'
+                   '            ["Enter a valid IPv4 address"] = "請輸入有效的 IPv4 位址",')
+
+
 def package(source, output):
-    base = 'Payload/openlf2.app/scripts/base/'
-    transforms = {base + 'game/network.lua': transport, base + 'ui/network.lua': lobby}
+    app = 'Payload/openlf2.app/'
+    base = app + 'scripts/base/'
+    game, menu = base + 'game/network.lua', base + 'ui/network.lua'
     with ZipFile(source) as original, ZipFile(output, 'w') as updated:
-        edits = {path: transform(original.read(path).decode()).encode() for path, transform in transforms.items()}
+        info = plistlib.loads(original.read(app + 'Info.plist'))
+        assert info['CFBundleIdentifier'] == 'io.github.retrogamehub.lf2ultimate.network'
+        edits = {
+            game: transport(original.read(game).decode()).encode(),
+            menu: direct_ip_keypad(lobby(original.read(menu).decode())).encode(),
+        }
         for item in original.infolist():
             contents = edits[item.filename] if item.filename in edits else original.read(item)
             updated.writestr(item, contents)
