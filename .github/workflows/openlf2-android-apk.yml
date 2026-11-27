@@ -13,7 +13,10 @@ jobs:
   package:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-friend-rooms-45970422869-1/Ultimate-LF2-Online-iOS-arm64-unsigned.ipa
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -33,20 +36,26 @@ jobs:
         run: |
           sha256sum -c Ultimate-LF2-Android-arm64-build-inputs.tar.gz.sha256
           tar -xzf Ultimate-LF2-Android-arm64-build-inputs.tar.gz
+      - name: Use the exact game scripts and data from the current iOS release
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE" -o source.ipa
+          python3 android-port/stage_scripts.py source.ipa prepared/build/android/assets
       - name: Install Android SDK and build tools
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;35.0.0'
       - name: Build and validate the signed test APK
         run: |
-          gradle --no-daemon -p prepared/android assembleDebug
+          gradle --no-daemon -p prepared/android -Popenlf2VersionCode=12 -Popenlf2VersionName=1.2.0-crossplay assembleDebug
           mkdir -p artifacts
           apk=artifacts/Ultimate-LF2-Android-arm64.apk
           cp prepared/android/app/build/outputs/apk/debug/app-debug.apk "$apk"
           tools="$ANDROID_HOME/build-tools/35.0.0"
-          "$tools/apksigner" verify --verbose --print-certs "$apk"
+          "$tools/apksigner" verify --verbose --print-certs "$apk" | tee apk-signing.txt
+          grep -Fx 'Signer #1 certificate SHA-256 digest: 63cf25a7fa57c0a64b9fdce16e9913fc75563e6af27b6d497a39be5ed3da9a11' apk-signing.txt
           "$tools/aapt" dump badging "$apk" > apk-badging.txt
           grep -F "package: name='io.github.retrogamehub.lf2ultimate.network'" apk-badging.txt
+          grep -F "versionCode='12'" apk-badging.txt
           grep -Fx "native-code: 'arm64-v8a'" apk-badging.txt
           python3 - "$apk" <<'PYTHON'
           import struct
@@ -55,8 +64,17 @@ jobs:
           from zipfile import ZipFile
 
           root = Path("prepared/build/android")
-          with ZipFile(sys.argv[1]) as apk:
+          with ZipFile(sys.argv[1]) as apk, ZipFile("source.ipa") as ipa:
               assert apk.testzip() is None
+              ios_prefix = "Payload/openlf2.app/scripts/"
+              android_prefix = "assets/scripts/"
+              ios_files = {name.removeprefix(ios_prefix) for name in ipa.namelist()
+                           if name.startswith(ios_prefix) and not name.endswith("/")}
+              android_files = {name.removeprefix(android_prefix) for name in apk.namelist()
+                               if name.startswith(android_prefix) and not name.endswith("/")}
+              assert ios_files == android_files
+              for name in ios_files:
+                  assert ipa.read(ios_prefix + name) == apk.read(android_prefix + name), name
               for directory, prefix in (("assets/scripts", "assets/scripts"), ("jniLibs", "lib")):
                   source = root / directory
                   files = [path for path in source.rglob("*") if path.is_file()]
@@ -79,5 +97,5 @@ jobs:
         run: |
           gh release create "ultimate-lf2-android-arm64-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
-            --title "終極 LF2｜Android ARM64 好友房測試版" \
-            --notes "Signed test APK for Android ARM64. It includes six-digit friend rooms and Quick Match. Android-to-iPhone play still requires device testing."
+            --title "終極 LF2｜Android ARM64 跨平台好友房測試版" \
+            --notes "Signed Android ARM64 test APK using the same game scripts and data as iOS build 45970422869-1. Six-digit friend rooms and Quick Match. Android-to-iPhone gameplay still requires device testing."

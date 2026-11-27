@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
-RELEASE_SHA256 = "846c2c031814d94f639cdd7051e257055d310b507af5f53335885be3bf9a3839"
+RELEASE_SHA256 = "c23301f67b233779afbc310a28f5ac1a2516a6b490af8d7844f22ece270f0cae"
 SCRIPT_PREFIX = "Payload/openlf2.app/scripts/"
 REQUIRED = {
     "base/game/network.lua",
