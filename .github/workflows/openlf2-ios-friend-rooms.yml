@@ -1,0 +1,91 @@
+name: Package Ultimate LF2 iOS friend rooms
+on:
+  push:
+    branches: [openlf2-ios-online]
+    paths: [.github/workflows/openlf2-ios-friend-rooms.yml, online/package_friend_rooms.py]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ultimate-lf2-ios-friend-rooms-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-online-45923296358-1
+      IPA: Ultimate-LF2-Online-iOS-arm64-unsigned.ipa
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test relay behavior locally
+        run: python3 -m unittest discover -s online -p 'test_*.py' -v
+      - name: Verify the previous ARM64 release and package the updated scripts
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
+          printf '%s  %s\n' 73e64d3ae8333dc52e27397fabf3f5ee32965166990e2ecc37ee95323a07a188 "$IPA" | sha256sum -c -
+          mkdir -p artifacts
+          python3 online/package_friend_rooms.py "$IPA" "artifacts/$IPA"
+          (cd artifacts && sha256sum "$IPA" > "$IPA.sha256")
+      - name: Verify both matchmaking modes on the public Railway relay
+        run: |
+          python3 - <<'PYTHON'
+          import re
+          import secrets
+          import socket
+          import time
+
+          endpoint = ("viaduct.proxy.rlwy.net", 59934)
+
+          def read(sock, size):
+              result = b""
+              while len(result) < size:
+                  chunk = sock.recv(size - len(result))
+                  if not chunk:
+                      raise EOFError("Relay closed the connection")
+                  result += chunk
+              return result
+
+          def exercise(friend_room):
+              profile = b"OpenLF2 TCP 1\n" + secrets.token_hex(32).encode()
+              with socket.create_connection(endpoint, 5) as first, socket.create_connection(endpoint, 5) as second:
+                  if friend_room:
+                      first.sendall(b"C" + profile)
+                      issued = read(first, 7)
+                      assert re.fullmatch(rb"R[0-9]{6}", issued), issued
+                      second.sendall(b"J" + profile + issued[1:])
+                      assert read(first, 1) == b"H"
+                      assert read(second, 1) == b"G"
+                  else:
+                      first.sendall(profile)
+                      second.sendall(profile)
+                      assert {read(first, 1), read(second, 1)} == {b"H", b"G"}
+                  first.sendall(b"ping")
+                  assert read(second, 4) == b"ping"
+                  second.sendall(b"pong")
+                  assert read(first, 4) == b"pong"
+
+          # Railway deploys this branch independently of GitHub Actions.
+          for attempt in range(18):
+              try:
+                  exercise(True)
+                  exercise(False)
+                  break
+              except (OSError, EOFError, AssertionError) as exc:
+                  if attempt == 17:
+                      raise
+                  print(f"Waiting for the relay deployment: {exc}", flush=True)
+                  time.sleep(10)
+          print("Public friend rooms and Quick Match passed pairing and bidirectional forwarding")
+          PYTHON
+      - name: Publish the unsigned iOS test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-friend-rooms-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜好友房測試版" \
+            --notes "Create Room displays a six-digit code. On the second iPhone, open Join Room and enter the code. Both devices should install this version. Quick Match and direct IP remain available. Unsigned IPA."
