@@ -1,0 +1,80 @@
+name: Package the iOS projectile frame fixes
+on:
+  push:
+    branches: [openlf2-ios-online]
+    paths: [.github/workflows/openlf2-ios-projectile-frames-test.yml]
+permissions:
+  contents: write
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SOURCE: https://github.com/RetroGame-Hub/lf2-web/releases/download/ultimate-lf2-ios-stage-five-debris-test-46084766990-1
+      IPA: Ultimate-LF2-Online-iOS-arm64-unsigned.ipa
+    steps:
+      - name: Verify and patch the tested iOS base
+        run: |
+          curl -fsSL --retry 3 --max-time 120 "$SOURCE/$IPA" -o "$IPA"
+          printf '%s  %s\n' 64d2dfa48de55b149c16085fe5ad209e2e643c26e3516f2a1f04927a9b718242 "$IPA" | sha256sum -c -
+          mkdir -p artifacts
+          python3 - "$IPA" "artifacts/$IPA" <<'PY'
+          import plistlib
+          import struct
+          import sys
+          from zipfile import ZipFile
+
+          app = 'Payload/openlf2.app/'
+          sprites = app + 'scripts/data-override/sprite/sys/'
+          images = {
+              sprites + 'julian_ball.bmp': (328, 249, 331, 8, 0),
+              sprites + 'henry_arrow1.bmp': (490, 146, 195, 24, 0),
+              sprites + 'rudolf_weapon.bmp': (490, 98, 195, 8, 83),
+          }
+
+          def pad(bitmap, width, old_height, new_height, depth, black):
+              assert bitmap[:2] == b'BM' and struct.unpack_from('<I', bitmap, 14)[0] == 40
+              assert struct.unpack_from('<iiHHI', bitmap, 18) == (width, old_height, 1, depth, 0)
+              offset = struct.unpack_from('<I', bitmap, 10)[0]
+              stride = ((width * depth + 31) // 32) * 4
+              used = (width * depth) // 8
+              trailing = bitmap[offset + stride * old_height:]
+              assert trailing == (bytes(2) if depth == 8 else b'')
+              if depth == 8:
+                  index = 54 + black * 4
+                  assert index + 4 <= offset and bitmap[index:index + 3] == bytes(3)
+              row = bytes([black]) * used + bytes(stride - used)
+              inserted = row * (new_height - old_height)
+              header = bytearray(bitmap[:offset])
+              struct.pack_into('<I', header, 2, len(bitmap) + len(inserted))
+              struct.pack_into('<i', header, 22, new_height)
+              struct.pack_into('<I', header, 34, new_height * stride)
+              # A positive BMP height stores bottom rows first.
+              return bytes(header) + inserted + bitmap[offset:]
+
+          source, output = sys.argv[1:]
+          with ZipFile(source) as original, ZipFile(output, 'w') as updated:
+              assert plistlib.loads(original.read(app + 'Info.plist'))['CFBundleIdentifier'] == 'io.github.retrogamehub.lf2ultimate.network'
+              assert images.keys() <= set(original.namelist())
+              for entry in original.infolist():
+                  payload = original.read(entry)
+                  updated.writestr(entry, pad(payload, *images[entry.filename]) if entry.filename in images else payload)
+          with ZipFile(source) as original, ZipFile(output) as updated:
+              assert updated.testzip() is None and updated.namelist() == original.namelist()
+              assert {entry for entry in updated.namelist() if updated.read(entry) != original.read(entry)} == images.keys()
+              for name, (width, old_height, new_height, depth, black) in images.items():
+                  old, new = original.read(name), updated.read(name)
+                  offset = struct.unpack_from('<I', old, 10)[0]
+                  stride = ((width * depth + 31) // 32) * 4
+                  assert struct.unpack_from('<i', new, 22)[0] == new_height
+                  assert new[offset + stride * (new_height - old_height):] == old[offset:]
+          PY
+          (cd artifacts && sha256sum "$IPA" > "$IPA.sha256")
+      - name: Publish the iOS-only test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ultimate-lf2-ios-projectile-frames-test-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "終極 LF2 iOS｜投射物畫格修補測試版" \
+            --notes "Includes the tested Stage 5 debris fix. Adds transparent padding to the Julian projectile, Henry arrow, and Rudolf shuriken sheets while preserving existing pixels and gameplay scripts. Unsigned ARM64 IPA. Use the standard releases for Android-to-iOS play."
